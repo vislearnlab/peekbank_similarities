@@ -1,0 +1,184 @@
+```{r}
+library(tidyverse)
+source("helpers.R")
+library(ggrepel)
+library(cowplot)
+```
+
+# Import data 
+```{r}
+usable_trials_summarized_with_sims <- read.csv(here("data/usable_trials_with_similarities.csv"))
+
+clip_data_summarized <- summarize_similarity_data_collapsed(usable_trials_summarized_with_sims, extra_fields = c("dataset_name", "vanilla_trial")) 
+```
+
+# Descriptives
+### Image pairs
+```{r}
+clip_stacked_bar <- clip_data_summarized |>
+  #filter(N > 10) |>
+  group_by(dataset_name) |>
+  summarize(trial_count = n(), vanilla_count = sum(vanilla_trial == 1), non_vanilla_count = sum(vanilla_trial != 1), .groups = "drop") |>
+  pivot_longer(cols = c(vanilla_count, non_vanilla_count), 
+               names_to = "trial_type", 
+               values_to = "count")
+
+# Create stacked bar chart
+ggplot(clip_stacked_bar, aes(x = dataset_name, y = count, fill = trial_type)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(title = "Number of unique target-distractor pairs",
+       x = "Dataset Name", 
+       y = "Count", 
+       fill = "Trial Type") +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+### Raw trial counts
+```{r}
+# Function to calculate Pearson's correlation per epoch
+round_to_nearest <- function(x, round_to=3) {
+  round(x / round_to) * round_to
+}
+
+# rounding each participant to the closest 5
+age_based_trials <- usable_trials_summarized_with_sims |> mutate(
+  rounded_age = round_to_nearest(age, round_to=5)
+)
+
+clip_age_stacked_bar <- age_based_trials |>
+  #filter(N > 10) |>
+  group_by(rounded_age, dataset_name) |>
+  summarize(trial_count = n(), .groups = "drop")
+
+ggplot(clip_age_stacked_bar, aes(x = factor(rounded_age), y = trial_count, fill = dataset_name)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Number of Trials by Dataset and Age",
+    x = "Age in months (rounded to nearest 5 month)",
+    y = "Number of Trials",
+    fill = "Dataset"
+  ) +
+  theme_minimal()
+```
+### Raw participant counts
+#### Per dataset
+```{r}
+trials_with_subject_info <- usable_trials_summarized_with_sims |> left_join(administrations |> select(administration_id, subject_id)) |>
+  left_join(subjects |> select(subject_id, subject_aux_data)) 
+
+subject_counts <- trials_with_subject_info |>
+  mutate(has_cdi = grepl("cdi", subject_aux_data)) |>
+  summarize(trial_count = n(), .by=c(has_cdi, subject_id, dataset_name))
+
+dataset_subject_counts <- subject_counts |>
+  summarize(subject_count = n(), average_trial_count = mean(trial_count), cdi_count = sum(has_cdi == TRUE), non_cdi_count = (sum(has_cdi == FALSE)), .by=dataset_name)  |>
+  pivot_longer(cols = c(cdi_count, non_cdi_count), 
+               names_to = "cdi", 
+               values_to = "count")
+
+# Create stacked bar chart
+ggplot(dataset_subject_counts, aes(x = paste0(dataset_name,"(subj trials M=", round(average_trial_count, 1), ")"), y = count, fill = cdi)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(title = "Number of participants",
+       x = "Dataset Name", 
+       y = "Count", 
+       fill = "Has CDI") +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+#### Per trial
+```{r}
+trial_participant_counts <- usable_trials_summarized_with_sims |> summarize(
+  admin_count = n(), .by=c(trial_type_id, dataset_name)
+)
+
+admin_based_trials <- trial_participant_counts |> mutate(
+  rounded_count = round_to_nearest(admin_count, round_to=5),
+  rounded_count = ifelse(rounded_count > 100, 100, rounded_count)
+)
+
+clip_admin_stacked_bar <- admin_based_trials |>
+  #filter(N > 10) |>
+  group_by(rounded_count, dataset_name) |>
+  summarize(trial_count = n(), .groups = "drop")
+
+ggplot(clip_admin_stacked_bar, aes(x = factor(rounded_count), y = trial_count, fill = dataset_name)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Number of Trials by dataset and admins",
+    x = "Number of participants by Trial type and Dataset (rounded to nearest 5 and clipped at 100)",
+    y = "Number of trials",
+    fill = "Dataset"
+  ) +
+  theme_minimal()
+```
+
+# Main analysis
+CLIP analysis: current similarity effects are dubious with lots of dataset level variance of course that will have to be accounted for in a mixed effects model; Garrison Bergelson dataset has individualized trials so difficult to make use of 
+```{r}
+clip_plots <- generate_multimodal_plots(clip_data_summarized, "CLIP")
+clip_plots
+
+# N = the number of participants in a single trial here
+adams_marchman_data_summarized <- summarize_similarity_data_collapsed(usable_trials_summarized_with_sims, extra_fields = c("dataset_name", "vanilla_trial")) |> filter(N > 10 & dataset_name == "adams_marchman_2018" & vanilla_trial==1)
+am_plots <- generate_multimodal_plots(adams_marchman_data_summarized, "CLIP", title="Adams & Marchman, 2018")
+am_plots
+
+ weaver_zettersten_data_summarized <- summarize_similarity_data_collapsed(usable_trials_summarized_with_sims, extra_fields = c("dataset_name", "vanilla_trial")) |> filter(N > 10 & dataset_name == "weaver_zettersten_2024" & vanilla_trial==1)
+wz_plots <- generate_multimodal_plots(weaver_zettersten_data_summarized, "CLIP")
+wz_plots
+```
+
+# Analysis across age
+```{r}
+calculate_correlations <- function(data, x_var, y_var, group_var = c("rounded_age"), conf_level = 0.95) {
+  data |>
+    group_by(across(all_of(group_var))) |>
+    summarize(
+      {
+        cor_test <- cor.test(.data[[x_var]], .data[[y_var]], method = "pearson", conf.level = conf_level)
+        tibble(
+          pearson_cor = cor_test$estimate,
+          p_value = cor_test$p.value,
+          ci_lower = cor_test$conf.int[1],
+          ci_upper = cor_test$conf.int[2]
+        )
+      },
+      .groups = "drop"
+    )
+}
+
+sim_age_plot <- function(data) {
+  ggplot(data, aes(x = rounded_age, y = pearson_cor, color = similarity_type)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_point(size = 3, position = position_dodge(width=0.5)) +  # Apply jitter to points only
+    geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), 
+                  width = 0.3, alpha = 0.5,
+                  position=position_dodge(width=0.5)) +  # No jitter on error bars
+    geom_smooth(span = 2, alpha=0.4, se=FALSE) +
+    labs(title = paste("Similarity correlations across age"),
+         x = "Age",
+         y = "Coefficient of similarity") +  
+    theme_minimal() +
+    guides(shape = "none") +
+    scale_color_brewer(palette = "Set1", name = "Similarity type") 
+}
+
+# filtering to 
+clip_data_age_summarized <- summarize_similarity_data_collapsed(age_based_trials, extra_fields = c("rounded_age", "dataset_name")) |> filter(N > 10)
+clip_age_image_cors <- calculate_correlations(clip_data_age_summarized, "image_similarity", "mean_value") |> mutate(similarity_type = "image")
+clip_age_text_cors <- calculate_correlations(clip_data_age_summarized, "text_similarity", "mean_value") |> mutate(similarity_type = "text")
+clip_age_cors <- bind_rows(clip_age_image_cors, clip_age_text_cors)
+sim_age_plot(clip_age_cors)
+
+ggplot(clip_age_cors, aes(x = rounded_age, y = pearson_cor)) +
+  geom_point(aes(color = p_value < 0.05), size = 3) + 
+  geom_smooth(span = 2) +
+  labs(title = "Image similarity correlation across age",
+       x = "Age in months",
+       y = "Pearson Correlation") +
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" = "gray")) +  # Set color for significance
+  theme_minimal() +
+  theme(legend.position = "none")
+```
