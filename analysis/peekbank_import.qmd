@@ -2,8 +2,8 @@
 title: "Peekbank image import"
 author: "Tarun Sepuri"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
-output:
-  html_document:
+format:
+  html:
     toc: true
     toc_depth: 3
     toc_float: true
@@ -16,9 +16,6 @@ If you haven't downloaded peekbankr (https://github.com/langcog/peekbankr) yet, 
 
 ```{r}
 knitr::opts_chunk$set(cache = FALSE, arn = FALSE,warning=FALSE, message = FALSE,cache.lazy = FALSE)
-
-install.packages("remotes") # can also use devtools
-remotes::install_github("peekbank/peekbankr", force=TRUE)
 ```
 
 # Preliminaries and data loading
@@ -27,6 +24,11 @@ Load packages. Since it takes a while to download and join the data, you probabl
 
 ```{r}
 FIRST_TIME = TRUE # set to true first time to download data from DB
+
+if (FIRST_TIME) {
+  install.packages("remotes") # can also use devtools
+  remotes::install_github("peekbank/peekbankr", force=TRUE)
+}
 
 library(peekbankr)
 library(tidyverse)
@@ -39,22 +41,36 @@ source("helpers.R")
 ```
 
 ```{r}
- # ds.get_raw_data("frank_tablet_2016", "kartushina_2021")
-conn = connect_to_peekbank("2025.2",port=3307)
-administrations <- peekbankr::get_administrations(connection = conn) %>% dplyr::collect()
-subjects <- peekbankr::get_subjects(connection = conn) %>% dplyr::collect()
-aoi_timepoints <- peekbankr::get_aoi_timepoints(connection = conn) %>% dplyr::collect()
-
-# need to reconnect since aoi_timepoints takes a long time and causes our connection to drop
-conn <- connect_to_peekbank("2025.2", port=3307)
-all_stimuli <- peekbankr::get_stimuli(connection = conn) %>% dplyr::collect()
-trial_types <- peekbankr::get_trial_types(connection = conn) %>% dplyr::collect()
-trials <- peekbankr::get_trials(connection = conn) %>% dplyr::collect()
+if (FIRST_TIME) {
+  
+  conn = connect_to_peekbank("2026.1",port=3307)
+  administrations <- peekbankr::get_administrations(connection = conn) %>% dplyr::collect()
+  subjects <- peekbankr::get_subjects(connection = conn) %>% dplyr::collect()
+  aoi_timepoints <- peekbankr::get_aoi_timepoints(connection = conn) %>% dplyr::collect()
+  
+  # need to reconnect since aoi_timepoints takes a long time and causes our connection to drop
+  conn <- connect_to_peekbank("2026.1", port=3307)
+  all_stimuli <- peekbankr::get_stimuli(connection = conn) %>% dplyr::collect()
+  trial_types <- peekbankr::get_trial_types(connection = conn) %>% dplyr::collect()
+  trials <- peekbankr::get_trials(connection = conn) %>% dplyr::collect()
+  saveRDS(administrations, here("intermediates/administrations.Rds"))
+  saveRDS(subjects, here("intermediates/subjects.Rds"))
+  saveRDS(aoi_timepoints, here("intermediates/aoi_timepoints.Rds"))
+  saveRDS(all_stimuli, here("intermediates/all_stimuli.Rds"))
+  saveRDS(trial_types, here("intermediates/trial_types.Rds"))
+  saveRDS(trials, here("intermediates/trials.Rds"))
+  DBI::dbDisconnect(conn)
+} else {
+  administrations <- readRDS(here("intermediates/administrations.Rds"))
+  subjects <- readRDS(here("intermediates/subjects.Rds"))
+  aoi_timepoints <- readRDS(here("intermediates/aoi_timepoints.Rds"))
+  all_stimuli <- readRDS(here("intermediates/all_stimuli.Rds"))
+  trial_types <- readRDS(here("intermediates/trial_types.Rds"))
+  trials <- readRDS(here("intermediates/trials.Rds"))
+}
 ```
 
-```{r}
-DBI::dbDisconnect(conn)
-```
+
 
 dataset level subject counts - more on this in the Descriptives section
 ```{r}
@@ -66,10 +82,14 @@ subj_counts <- administrations |> left_join(subjects) |>
 # Downloading stimuli files
 
 ```{r}
-conn = connect_to_peekbank("2025.2",port=3307)
-downloaded_stimuli <- peekbankr::download_stimuli(conn, local_base_dir = "stimulus_data")
-DBI::dbDisconnect(conn)
-
+if (FIRST_TIME) {
+  conn = connect_to_peekbank("2026.1",port=3307)
+  downloaded_stimuli <- peekbankr::download_stimuli(conn, local_base_dir = "stimulus_data")
+  DBI::dbDisconnect(conn)
+  saveRDS(downloaded_stimuli, here("intermediates/downloaded_stimuli.Rds"))
+} else {
+  downloaded_stimuli <- readRDS(here("intermediates/downloaded_stimuli.Rds"))
+}
 stimuli_dataset_information <- downloaded_stimuli |>
   group_by(dataset_id, dataset_name) |>
   summarise(
@@ -79,20 +99,9 @@ stimuli_dataset_information <- downloaded_stimuli |>
   )
 
 stimuli_dataset_information
+
 ```
-```{r}
-downloadable_stimuli <- all_stimuli |>
-  filter(grepl("png", stimulus_image_path) | grepl("jpg", stimulus_image_path)) |>
-  mutate(stimulus_image_path_cleaned = gsub("^/|raw_data/", "", stimulus_image_path)) |>
-  group_by(dataset_id) |>
-   mutate(
-    # Identify the common prefix across all paths in a dataset, remove any "/" at the beginning of the common_prefix
-    common_prefix = find_common_prefix(stimulus_image_path_cleaned),
-    # Find the part of the stimulus_image_path_cleaned after removing the common_prefix
-    subfix = sub(paste0("^", common_prefix), "", stimulus_image_path_cleaned)
-  ) |> 
-  ungroup()
-```
+
 
 Just plotting dataset stimuli information
 ```{r}
@@ -293,7 +302,6 @@ ggplot(summarize_subjects, aes(x = age, y = mean_value)) +
 
 #Loading CLIP similarities
 ```{r}
-# TODO: removing potter_remix stimuli for now which has incorrect image descriptions, should be fixed
 clip_similarities <- read.csv(here("data", "similarities-clip_data.csv")) |> 
   mutate(text_similarity = ifelse(grepl("/", text1), NA, text_similarity))
 
@@ -322,10 +330,20 @@ usable_trials_imagepair_sims <- usable_trials_summarized_with_sims |>
       ~ifelse(is.na(.), first(.[!is.na(.)]), .)
     )) |>
   ungroup() 
+```
 
-# Filtering out trials which on the Peekbank-side allegedly had images but did not in actuality
+Filtering out trials which on the Peekbank-side allegedly had images but did not in actuality
+```{r}
 unusable_trials <- usable_trials_imagepair_sims |> filter(is.na(image_similarity)) |> distinct(unique_pair, .keep_all=TRUE) |> select(dataset_name, unique_pair, target_id, distractor_id, image1, image2)
+```
+
+also filtering out non-vanilla trials and datasets
+```{r}
 usable_trials_summarized_with_sims <- usable_trials_imagepair_sims |> filter(!is.na(image_similarity))
+non_vanilla_trials <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 0)
+usable_trials_summarized_with_sims <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 1)
+non_vanilla_datasets <- non_vanilla_trials |> distinct(dataset_name) |> anti_join(usable_trials_summarized_with_sims |> distinct(dataset_name))
+non_vanilla_datasets
 ```
 
 Exporting trial-level data
@@ -345,6 +363,11 @@ non_usable_unique_pairs <- clip_similarities |>
 trial_types <- trial_types |>
  mutate(unique_pair = pmap_chr(list(target_id, distractor_id), ~ paste(sort(c(.x, .y)), collapse = "_")))
 
+print(paste("Number of datasets:", count(usable_trials_summarized_with_sims |> distinct(dataset_name))))
+print(paste("Total subjects:", count(usable_trials_summarized_with_sims|> left_join(administrations |> select(administration_id, subject_id)) |> distinct(subject_id))))
+print(paste("Total trials:", count(usable_trials_summarized_with_sims)))
+
+
 cat("\nUnique label-target-distractor pairs\n")
 print(paste("Number of unique label-target-distractor pairs:", count(usable_trials_summarized_with_sims |> distinct(image_description_target, image_description_distractor, dataset_name))))
 print(paste("Number of unique label-target-distractor pairs with unique image-target distractor pairs:", count(usable_trials_summarized_with_sims |> distinct(image_description_target, image_description_distractor, image1, image2, dataset_name, full_phrase_language))))
@@ -362,5 +385,77 @@ print(paste("Number of trial types:", count(usable_trials_summarized_with_sims |
 print(paste("Total trial types in Peekbank:", count(trial_types |> distinct(trial_type_id))))
 ```
 
+# Descriptive plots
+### label-target-distractor combinations 
+```{r}
+trial_counts <- clip_data_summarized |>
+  #filter(N > 10) |>
+  distinct(image_description_target, image_description_distractor, dataset_name) |>
+  summarize(count = n(), .by="dataset_name") |>
+  arrange(count)
+
+# Create stacked bar chart
+ggplot(trial_counts, aes(x = reorder(dataset_name, -count), y = count)) +
+  geom_col(fill="skyblue") +
+  labs(title = "Number of unique label-target-distractor combinations",
+       x = "Dataset Name", 
+       y = "Count",
+       fill = "Trial Type") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+### raw trial counts
+```{r}
+# Function to calculate Pearson's correlation per epoch
+round_to_nearest <- function(x, round_to=3) {
+  round(x / round_to) * round_to
+}
+
+# rounding each participant to the closest 5
+age_based_trials <- usable_trials_summarized_with_sims |> mutate(
+  rounded_age = round_to_nearest(age, round_to=5)
+)
+
+clip_age_stacked_bar <- age_based_trials |>
+  #filter(N > 10) |>
+  group_by(rounded_age, dataset_name) |>
+  summarize(trial_count = n(), .groups = "drop")
+
+ggplot(clip_age_stacked_bar, aes(x = factor(rounded_age), y = trial_count, fill = dataset_name)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Number of Trials by Dataset and Age",
+    x = "Age in months (rounded to nearest 5 month)",
+    y = "Number of Trials",
+    fill = "Dataset"
+  ) +
+  theme_minimal()
+```
+### Raw participant counts
+#### Per dataset
+```{r}
+trials_with_subject_info <- usable_trials_summarized_with_sims |> left_join(administrations |> select(administration_id, subject_id)) |>
+  left_join(subjects |> select(subject_id, subject_aux_data)) 
+
+subject_counts <- trials_with_subject_info |>
+  mutate(has_cdi = grepl("cdi", subject_aux_data)) |>
+  summarize(trial_count = n(), .by=c(has_cdi, subject_id, dataset_name))
+
+dataset_subject_counts <- subject_counts |>
+  summarize(subject_count = n(), average_trial_count = mean(trial_count), cdi_count = sum(has_cdi == TRUE), non_cdi_count = (sum(has_cdi == FALSE)), .by=dataset_name)  |>
+  pivot_longer(cols = c(cdi_count, non_cdi_count), 
+               names_to = "cdi", 
+               values_to = "count")
+
+# Create stacked bar chart
+ggplot(dataset_subject_counts, aes(x = reorder(paste0(dataset_name,"(subj trials M=", round(average_trial_count, 1), ")"), -count), y = count)) +
+  geom_bar(stat = "identity", position = "stack", fill="skyblue") +
+  labs(title = "Number of participants",
+       x = "Dataset Name", 
+       y = "Count") +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
 
 
