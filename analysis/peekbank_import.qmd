@@ -353,6 +353,8 @@ write.csv(usable_trials_summarized_with_sims, here("data/usable_trials_with_simi
 
 # Printing data counts
 ```{r}
+things_categories <- read.csv(here("data/things_categories.csv"))
+things_coverage <- usable_trials_summarized_with_sims |> semi_join(things_categories, by=c("text1"="Word")) |> semi_join(things_categories, by=c("text2"="Word"))
 # trial types for which all of the trials were marked as unusable
 clip_data_summarized <- summarize_similarity_data_collapsed(usable_trials_summarized_with_sims, extra_fields = c("dataset_name", "vanilla_trial")) 
 non_usable_unique_pairs <- clip_similarities |>
@@ -366,10 +368,12 @@ trial_types <- trial_types |>
 print(paste("Number of datasets:", count(usable_trials_summarized_with_sims |> distinct(dataset_name))))
 print(paste("Total subjects:", count(usable_trials_summarized_with_sims|> left_join(administrations |> select(administration_id, subject_id)) |> distinct(subject_id))))
 print(paste("Total trials:", count(usable_trials_summarized_with_sims)))
-
+print(paste("Total trials covered by THINGS:", count(things_coverage)))
+print(paste("Total target labels:", count(usable_trials_summarized_with_sims |> distinct(text1))))
 
 cat("\nUnique label-target-distractor pairs\n")
 print(paste("Number of unique label-target-distractor pairs:", count(usable_trials_summarized_with_sims |> distinct(image_description_target, image_description_distractor, dataset_name))))
+print(paste("Number of unique label-target-distractor pairs covered by THINGS:", count(things_coverage |> distinct(image_description_target, image_description_distractor, dataset_name))))
 print(paste("Number of unique label-target-distractor pairs with unique image-target distractor pairs:", count(usable_trials_summarized_with_sims |> distinct(image_description_target, image_description_distractor, image1, image2, dataset_name, full_phrase_language))))
 print(paste("Number of unique label-target-distractor ids:", count(usable_trials_summarized_with_sims |> distinct(target_id, distractor_id, dataset_name))))
 print(paste("Total label-target-distractor pairs in Peekbank:", count(trial_types |> distinct(target_id, distractor_id))))
