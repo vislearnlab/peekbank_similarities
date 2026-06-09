@@ -23,7 +23,7 @@ knitr::opts_chunk$set(cache = FALSE, arn = FALSE,warning=FALSE, message = FALSE,
 Load packages. Since it takes a while to download and join the data, you probably want to just do that once, and then save the resulting dataset. Setting the parameter FIRST_TIME to FALSE after you run the script the first time allows you to bypass the data download process on subsequent runs. You can also use the most recent data file uploaded to GitHub.
 
 ```{r}
-FIRST_TIME = TRUE # set to true first time to download data from DB
+FIRST_TIME = FALSE # set to true first time to download data from DB
 
 if (FIRST_TIME) {
   install.packages("remotes") # can also use devtools
@@ -114,7 +114,8 @@ ggplot(stimuli_dataset_information, aes(x=prop_with_defined_path, y=stimuli_with
 Create a CSV file of all of the pairs of images in all of the trials that we have stimuli files for
 ```{r}
 stimuli_trial_info <-  downloaded_stimuli |> 
-      select(stimulus_id, image_description, local_stimulus_path)
+      select(stimulus_id, image_description, local_stimulus_path, english_stimulus_label) |>
+      mutate(english_stimulus_label = str_to_lower(english_stimulus_label))
 
 downloaded_stimuli_trials <- trial_types |>
   left_join(
@@ -137,9 +138,9 @@ downloaded_stimuli_trials <- trial_types |>
 # unique pairs keep trial-distractor pairing, we only need to find similarities for the trials that we but we will probably need to do pair-wise comparisons down the line
 unique_stimuli_pairs <- downloaded_stimuli_trials |>
   distinct(unique_pair, .keep_all=TRUE) |>
-  rename(text1=image_description_target, text2=image_description_distractor, image1=local_stimulus_path_target, image2=local_stimulus_path_distractor,dataset_name=dataset_name)
+  rename(text1=english_stimulus_label_target, text2=english_stimulus_label_distractor, text1_description=image_description_target, text2_description=image_description_distractor, image1=local_stimulus_path_target, image2=local_stimulus_path_distractor,dataset_name=dataset_name)
 
-write.csv(unique_stimuli_pairs,file=here("peekbank_stimuli.csv"))
+write.csv(unique_stimuli_pairs,file=here("data/peekbank_stimuli.csv"))
 ```
 
 ```{r}
@@ -242,11 +243,19 @@ summarize_subj_usable_trials_baseline_window <- summarize_subj_usable_trials(
   critical_window = baseline_window,
   suffix = "baseline_window")
 
+min_baseline_values <- downloaded_aois |>
+  group_by(administration_id, trial_id, trial_type_id) |>
+  filter(t_norm == min(t_norm)) |>
+  rename(min_time = t_norm) |>
+  distinct()
+
 #overall usable trials
 summarize_subj_trials <- downloaded_aois %>%
   distinct(administration_id, trial_id, trial_type_id) %>%
   left_join(summarize_subj_usable_trials_critical_window) %>%
   left_join(summarize_subj_usable_trials_baseline_window) %>%
+  # joining in min baseline window value, for baseline window related stats we need to filter to baseline windows with -500ms or lower min value.
+  left_join(min_baseline_values) %>%
   mutate(
     usable_window = compute_usable_trial(usable_baseline_window, usable_critical_window),
     usable_window_short = compute_usable_trial(usable_baseline_window, usable_critical_window_short),
@@ -257,7 +266,12 @@ summarize_subj_trials <- downloaded_aois %>%
 
 ```{r}
 usable_trials_summarized <- summarize_subj_trials %>%
-  filter(usable_window == 1)
+  # filtering to trials where participant looks for more than 50% of the baseline and critical windows.
+  filter(usable_window == 1) |> left_join(administrations |> select(administration_id, subject_id)) |>
+  # excluding participants with less than 5 trials
+  group_by(subject_id) |>
+  filter(n() >= 5) |>
+  ungroup()
 ```
 
 ### Overall timecourse plot of proportion target looking 
@@ -300,14 +314,14 @@ ggplot(summarize_subjects, aes(x = age, y = mean_value)) +
 ```
 
 
-#Loading CLIP similarities
+#Loading CLIP and other similarities
 ```{r}
-clip_similarities <- read.csv(here("data", "similarities-clip_data.csv")) |> 
+similarities <- read.csv(here("data", "similarities_data.csv")) |> 
   mutate(text_similarity = ifelse(grepl("/", text1), NA, text_similarity))
 
-usable_trials_summarized_with_sims <- usable_trials_summarized |>
+usable_trials_summarized_with_sims <- usable_trials_summarized |> select(-dataset_id, -dataset_name) |>
   left_join(downloaded_stimuli_trials |> select(trial_type_id, unique_pair, local_stimulus_path_target, local_stimulus_path_distractor, image_description_target, image_description_distractor, target_id, distractor_id), by=c("trial_type_id")) |>
-  left_join(clip_similarities |> select(-trial_type_id, -target_id, -distractor_id), by = c("unique_pair")) |>
+  left_join(similarities |> select(-trial_type_id, -target_id, -distractor_id), by = c("unique_pair")) |>
   left_join(administrations |> select("administration_id", "age") )|>
   group_by(unique_pair) |>
   # similarity scores are only generated for a single trial type ID so here we're mapping those scores to other trials that have the same image pair 
@@ -319,10 +333,10 @@ usable_trials_summarized_with_sims <- usable_trials_summarized |>
   ) |>
   ungroup() 
 
-cols_to_update <- colnames(clip_similarities|> select(-trial_type_id, -target_id, -distractor_id)) 
+cols_to_update <- colnames(similarities|> select(-trial_type_id, -target_id, -distractor_id)) 
 usable_trials_imagepair_sims <- usable_trials_summarized_with_sims |>
   mutate(unique_imagepair = pmap_chr(list(local_stimulus_path_target, local_stimulus_path_distractor), ~ paste(sort(c(.x, .y)), collapse = "_")),
-         unique_textpair = pmap_chr(list(image_description_target, image_description_distractor), ~ paste(sort(c(.x, .y)), collapse = "_"))) |>
+         unique_textpair = pmap_chr(list(text1, text2), ~ paste(sort(c(.x, .y)), collapse = "_"))) |>
   group_by(unique_imagepair, unique_textpair) |>
   mutate(
     across(
@@ -340,7 +354,8 @@ unusable_trials <- usable_trials_imagepair_sims |> filter(is.na(image_similarity
 also filtering out non-vanilla trials and datasets
 ```{r}
 usable_trials_summarized_with_sims <- usable_trials_imagepair_sims |> filter(!is.na(image_similarity))
-non_vanilla_trials <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 0)
+# moving this to later in processing for now 
+# non_vanilla_trials <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 0)
 usable_trials_summarized_with_sims <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 1)
 non_vanilla_datasets <- non_vanilla_trials |> distinct(dataset_name) |> anti_join(usable_trials_summarized_with_sims |> distinct(dataset_name))
 non_vanilla_datasets
@@ -356,8 +371,8 @@ write.csv(usable_trials_summarized_with_sims, here("data/usable_trials_with_simi
 things_categories <- read.csv(here("data/things_categories.csv"))
 things_coverage <- usable_trials_summarized_with_sims |> semi_join(things_categories, by=c("text1"="Word")) |> semi_join(things_categories, by=c("text2"="Word"))
 # trial types for which all of the trials were marked as unusable
-clip_data_summarized <- summarize_similarity_data_collapsed(usable_trials_summarized_with_sims, extra_fields = c("dataset_name", "vanilla_trial")) 
-non_usable_unique_pairs <- clip_similarities |>
+clip_data_summarized <- summarize_similarity_data_collapsed(usable_trials_summarized_with_sims, extra_fields = c("dataset_name", "vanilla_trial"))
+non_usable_unique_pairs <- similarities |>
   anti_join(usable_trials_summarized |>
   left_join(downloaded_stimuli_trials |> select(trial_type_id, unique_pair, local_stimulus_path_target, local_stimulus_path_distractor), by=c("trial_type_id")), by = c("unique_pair")) |>
   distinct(unique_pair, .keep_all = TRUE)
@@ -368,12 +383,14 @@ trial_types <- trial_types |>
 print(paste("Number of datasets:", count(usable_trials_summarized_with_sims |> distinct(dataset_name))))
 print(paste("Total subjects:", count(usable_trials_summarized_with_sims|> left_join(administrations |> select(administration_id, subject_id)) |> distinct(subject_id))))
 print(paste("Total trials:", count(usable_trials_summarized_with_sims)))
-print(paste("Total trials covered by THINGS:", count(things_coverage)))
+print(paste("Total trials covered by THINGS initially:", count(things_coverage)))
+print(paste("Total trials covered by THINGS afer replacements:", count(usable_trials_summarized_with_sims |> filter(!is.na(ooo_similarity)))))
+
 print(paste("Total target labels:", count(usable_trials_summarized_with_sims |> distinct(text1))))
 
 cat("\nUnique label-target-distractor pairs\n")
 print(paste("Number of unique label-target-distractor pairs:", count(usable_trials_summarized_with_sims |> distinct(image_description_target, image_description_distractor, dataset_name))))
-print(paste("Number of unique label-target-distractor pairs covered by THINGS:", count(things_coverage |> distinct(image_description_target, image_description_distractor, dataset_name))))
+print(paste("Number of unique label-target-distractor pairs covered by THINGS:", count(usable_trials_summarized_with_sims |> filter(!is.na(ooo_similarity)) |> distinct(image_description_target, image_description_distractor, dataset_name))))
 print(paste("Number of unique label-target-distractor pairs with unique image-target distractor pairs:", count(usable_trials_summarized_with_sims |> distinct(image_description_target, image_description_distractor, image1, image2, dataset_name, full_phrase_language))))
 print(paste("Number of unique label-target-distractor ids:", count(usable_trials_summarized_with_sims |> distinct(target_id, distractor_id, dataset_name))))
 print(paste("Total label-target-distractor pairs in Peekbank:", count(trial_types |> distinct(target_id, distractor_id))))
@@ -462,4 +479,30 @@ ggplot(dataset_subject_counts, aes(x = reorder(paste0(dataset_name,"(subj trials
   theme(axis.text.x = element_text(angle = 90, hjust = 1))
 ```
 
+#### Per trial
+```{r}
+trial_participant_counts <- usable_trials_summarized_with_sims |> summarize(
+  admin_count = n(), .by=c(trial_type_id, dataset_name)
+)
+
+admin_based_trials <- trial_participant_counts |> mutate(
+  rounded_count = round_to_nearest(admin_count, round_to=5),
+  rounded_count = ifelse(rounded_count > 100, 100, rounded_count)
+)
+
+clip_admin_stacked_bar <- admin_based_trials |>
+  #filter(N > 10) |>
+  group_by(rounded_count, dataset_name) |>
+  summarize(trial_count = n(), .groups = "drop")
+
+ggplot(clip_admin_stacked_bar, aes(x = factor(rounded_count), y = trial_count, fill = dataset_name)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Number of Trials by dataset and admins",
+    x = "Number of participants by Trial type and Dataset (rounded to nearest 5 and clipped at 100)",
+    y = "Number of trials",
+    fill = "Dataset"
+  ) +
+  theme_minimal()
+```
 

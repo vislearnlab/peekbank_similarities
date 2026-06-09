@@ -3,3 +3,16 @@
 .RData**
 .Ruserdata
 **.DS_Store
+# make sure to make this file based on .env_template
+.env
+
+# these files are too big:
+
+# AoA ratings from Kuperman et al., 2012
+data/metadata/level-aoaratings_type-kuperman_data.csv
+# downloaded stimuli
+data/stimulus_data
+# images paired against one another for saliency analyses
+data/composites
+# peekbank Rds files
+intermediates
