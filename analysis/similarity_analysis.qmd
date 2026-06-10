@@ -1,3 +1,18 @@
+---
+title: "Peekbank similarity analyses"
+author: "Tarun Sepuri"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    self-contained: true
+execute:
+  warning: false
+  message: false
+---
+
 ```{r}
 library(tidyverse)
 source("helpers.R")
@@ -13,7 +28,11 @@ aoa_ratings <- read.csv(here("data/metadata/level-aoaratings_type-kuperman_data.
 saliency_values <- read.csv(here("data/metadata/level-imagepair_added-saliency_data.csv"))
 usable_trials_summarized_with_sims <- usable_trials_summarized_with_sims |> 
   left_join(aoa_ratings |> transmute(text1=Word, aoa=AoA_Kup_lem)) |>
-  left_join(saliency_values, by=c("unique_pair"="ImagePair"))
+  left_join(saliency_values, by=c("unique_pair"="ImagePair")) |>
+  mutate(age_bucket = cut(age, 
+                          breaks = c(12, 24, 36, 48, 60), 
+                          labels = c("(12-24]", "(24-36]", "(36-48]", "(48-60]"),
+                          include.lowest = TRUE))
 
 # rounding each participant to the closest 5
 age_based_trials <- usable_trials_summarized_with_sims |> mutate(
@@ -21,6 +40,10 @@ age_based_trials <- usable_trials_summarized_with_sims |> mutate(
 )
 
 clip_data_summarized <- summarize_similarity_data_collapsed(usable_trials_summarized_with_sims, extra_fields = c("dataset_name", "vanilla_trial", "aoa", "MeanSaliencyDiff")) |> mutate(
+   sim_logit = qlogis(pmin(pmax(image_similarity, 1e-6), 1 - 1e-6))
+)
+
+clip_data_summarized_age_bucket <- summarize_similarity_data_collapsed(usable_trials_summarized_with_sims, extra_fields = c("dataset_name", "vanilla_trial", "aoa", "MeanSaliencyDiff", "age_bucket")) |> mutate(
    sim_logit = qlogis(pmin(pmax(image_similarity, 1e-6), 1 - 1e-6))
 )
 ```
@@ -45,21 +68,63 @@ clip_data_summarized <- summarize_similarity_data_collapsed(usable_trials_summar
   theme_minimal()
 ```
 
-# Main analysis
-CLIP analysis: current similarity effects are dubious with lots of dataset level variance of course that will have to be accounted for in a mixed effects model; Garrison Bergelson dataset has individualized trials so difficult to make use of 
-```{r}
+# Main similarity plots
+
+CLIP analysis: current similarity effects are dubious with lots of dataset level variance of course that will have to be accounted for in a mixed effects model; Garrison Bergelson dataset has individualized trials so difficult to make use of as well.
+
+```{r fig.width=15, fig.height=15}
 # N = the number of participants in a single trial here
 adams_marchman_data_summarized <- summarize_similarity_data_collapsed(usable_trials_summarized_with_sims, extra_fields = c("dataset_name", "vanilla_trial")) |> filter(N > 10 & dataset_name == "adams_marchman_2018" & vanilla_trial==1)
 am_plots <- generate_multimodal_plots(adams_marchman_data_summarized, "CLIP", title="Adams & Marchman, 2018")
 am_plots
 
 weaver_zettersten_data_summarized <- summarize_similarity_data_collapsed(usable_trials_summarized_with_sims, extra_fields = c("dataset_name", "vanilla_trial")) |> filter(N > 10 & dataset_name == "weaver_zettersten_2024" & vanilla_trial==1)
-wz_plots <- generate_multimodal_plots(weaver_zettersten_data_summarized, "CLIP")
+wz_plots <- generate_multimodal_plots(weaver_zettersten_data_summarized, "CLIP", title="Weaver et al., 2024")
 wz_plots
 
-clip_plots <- generate_multimodal_plots(clip_data_summarized |> filter(vanilla_trial==1), "CLIP")
+clip_plots <- generate_multimodal_plots(clip_data_summarized |> filter(vanilla_trial==1), "CLIP", title="all vanilla trials")
 clip_plots
 ```
+
+## more multimodal plot visualizations
+```{r fig.width=15, fig.height=15}
+vanilla <- clip_data_summarized |> filter(vanilla_trial == 1)
+
+generate_multimodal_plots(vanilla, "CLIP", title = "all vanilla trials", size_by_n = TRUE, base_size=16)
+generate_multimodal_plots(vanilla, "CLIP", title = "by dataset",   group_var = "dataset_name", se_alpha=0.2, point_alpha=0.1, show_legend = TRUE, line_alpha=0.4, show_cor=FALSE, overall_line=TRUE, overall_alpha=0.7, base_size=16)
+generate_multimodal_plots(clip_data_summarized, "CLIP", title = "by trial type", group_var = "vanilla_trial", point_alpha=0.1, show_se=TRUE, base_size=16)
+generate_multimodal_plots(clip_data_summarized_age_bucket |> filter(vanilla_trial == 1 & !is.na(age_bucket)), "CLIP", title = "different age buckets", group_var = "age_bucket",  show_se = TRUE, se_alpha = 0.2, point_alpha=0.1, line_alpha = 0.8, line_width=1.1, base_size=16)
+```
+
+## comparing all IVs
+```{r}
+library(GGally)
+confusability_vars <- clip_data_summarized |>
+  filter(vanilla_trial==1) |>
+  transmute(
+    mean_value=scale(mean_value)[, 1],
+    image_similarity=scale(image_similarity)[, 1],
+    text_similarity=scale(text_similarity)[, 1],
+    multimodal_similarity=scale(multimodal_similarity)[, 1],
+    ooo_similarity=scale(ooo_similarity)[, 1],
+    aoa=scale(aoa)[, 1],
+    MeanSaliencyDiff=scale(MeanSaliencyDiff)[, 1]
+  )
+
+p <- ggpairs(
+  confusability_vars,
+  upper = list(continuous = wrap("cor", method = "spearman",
+                                 use = "pairwise.complete.obs", size = 3)),
+  lower = list(continuous = wrap("smooth", method = "lm",
+                                 alpha = 0.4, size = 0.8)),
+  diag  = list(continuous = wrap("densityDiag", alpha = 0.5))
+) +
+  theme_bw()
+
+p
+```
+lots of interesting colinear effects here with AoA and mean saliency..
+
 
 # Analysis across age
 ```{r}
@@ -118,37 +183,11 @@ ggplot(clip_age_cors, aes(x = rounded_age, y = pearson_cor)) +
   theme_minimal() +
   theme(legend.position = "none")
 ```
-## comparing vars
-```{r}
-library(GGally)
-confusability_vars <- clip_data_summarized |>
-  filter(vanilla_trial==1) |>
-  select(
-    mean_value,
-    image_similarity,
-    text_similarity,
-    multimodal_similarity,
-    ooo_similarity,
-    aoa,
-    MeanSaliencyDiff
-  )
-
-p <- ggpairs(
-  confusability_vars,
-  upper = list(continuous = wrap("cor", method = "spearman",
-                                 use = "pairwise.complete.obs", size = 3)),
-  lower = list(continuous = wrap("smooth", method = "lm",
-                                 alpha = 0.4, size = 0.8)),
-  diag  = list(continuous = wrap("densityDiag", alpha = 0.5))
-) +
-  theme_bw()
-
-p
-```
-lots of interesting colinear effects here with AoA and mean saliency..
 
 
-## stats
+# stats
+
+## pre-registered models
 ```{r}
 library(lmerTest)
 library(glmmTMB)
@@ -162,9 +201,6 @@ fit_main <- function(sim,
                      added_structure = NULL, pruned_model=FALSE) {
   terms <- c(
     sprintf("scale(%s)*scale(age)", sim),
-    "scale(aoa)",
-    "scale(MeanSaliencyDiff)",
-    "(1 | text1:unique_pair)",
     "(1 | dataset_id)"
   )
   if (pruned_model) {
@@ -187,9 +223,7 @@ lapply(mods, function(m) m@optinfo$conv$lme4$messages)
 lapply(mods, function(m) summary(m))
 r.squaredGLMM(mods$image_similarity)
 ```
-
-
-Multimodal model did not converge, trying to see if there are missing values.
+Trying to see why text and multimodal similarity models were singular.
 ```{r}
 vars <- c("image_similarity", "text_similarity", "multimodal_similarity",
           "ooo_similarity", "mean_target_looking_critical_window",
@@ -204,15 +238,9 @@ sum(complete.cases(model_data[vars]))
 # rows complete without requiring ooo
 sum(complete.cases(model_data[setdiff(vars, "ooo_similarity")]))
 ```
-
-getting rid of singular effects and lack of convergence
+### getting rid of singular effects
+getting rid of singular effects 
 ```{r}
-pruned_image_model <- lmer(scale(mean_target_looking_critical_window) ~ scale(image_similarity)*scale(age)
-                    + scale(aoa) + scale(MeanSaliencyDiff)
-                    + (1 | subject_id)
-                    + (1 | text1:unique_pair)
-                    + (1 | dataset_id), data = model_data)
-
 pruned_text_model <- lmer(scale(mean_target_looking_critical_window) ~ scale(text_similarity)*scale(age)
                     + scale(aoa) + scale(MeanSaliencyDiff)
                     + (1 | subject_id)
@@ -223,20 +251,13 @@ pruned_multimodal_model <- lmer(scale(mean_target_looking_critical_window) ~ sca
                     + scale(aoa) + scale(MeanSaliencyDiff)
                     + (1 | subject_id)
                     + (1 | text1:unique_pair)
-                    # not sure if I can do this?
-                    + (1|dataset_id), data = model_data, control = lmerControl(optimizer ="Nelder_Mead"))
+                    + (1|dataset_id), data = model_data)
 
-pruned_ooo_model <- lmer(scale(mean_target_looking_critical_window) ~ scale(ooo_similarity)*scale(age)
-                    + scale(aoa) + scale(MeanSaliencyDiff)
-                    + (1 | subject_id)
-                    + (1 | text1:unique_pair)
-                    + (1|dataset_id), data = usable_trials_summarized_with_sims)
-summary(pruned_image_model)
 summary(pruned_text_model)
 summary(pruned_multimodal_model)
-summary(pruned_ooo_model)
 ```
 
+### model comparison
 Effects persist in the pruned models. Now trying to compare to see which one has the best fit.
 ```{r}
 dat_cc <- model_data |>
@@ -276,7 +297,7 @@ multimodal similarity and image similarity ar  the only significant ones here...
 ```{r}
 pruned_multimodal_model_all <- lmer(scale(mean_target_looking_critical_window) ~ scale(multimodal_similarity)*scale(age)
                     + scale(aoa) + scale(MeanSaliencyDiff)
-                    + (1 | administration_id)
+                    + (1 | subject_id)
                     + (1|dataset_id), data = usable_trials_summarized_with_sims)
 summary(pruned_multimodal_model_all)
 ```
@@ -296,7 +317,8 @@ mods_baseline_corrected <-  lapply(sims, fit_main, data=baseline_data, response=
 lapply(mods_baseline_corrected, function(m) summary(m))
 ```
 
-## LWL specific ages and AoA? Under 3 year olds
+## Under 3 years old
+LWL specific ages and AoA?
 ```{r}
 mods_younger <-  lapply(sims, fit_main, data=model_data |> filter(age < 36), response="corrected_target_looking", pruned_model=TRUE); names(mods_younger) <- sims
 lapply(mods_younger, function(m) summary(m))
