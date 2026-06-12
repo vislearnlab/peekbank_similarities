@@ -114,8 +114,8 @@ ggplot(stimuli_dataset_information, aes(x=prop_with_defined_path, y=stimuli_with
 Create a CSV file of all of the pairs of images in all of the trials that we have stimuli files for
 ```{r}
 stimuli_trial_info <-  downloaded_stimuli |> 
-      select(stimulus_id, image_description, local_stimulus_path, english_stimulus_label) |>
-      mutate(english_stimulus_label = str_to_lower(english_stimulus_label))
+      select(stimulus_id, image_description, local_stimulus_path, english_stimulus_label, original_stimulus_label) |>
+      mutate(english_stimulus_label = str_to_lower(english_stimulus_label), original_stimulus_label = str_to_lower(original_stimulus_label))
 
 downloaded_stimuli_trials <- trial_types |>
   left_join(
@@ -137,8 +137,7 @@ downloaded_stimuli_trials <- trial_types |>
 
 # unique pairs keep trial-distractor pairing, we only need to find similarities for the trials that we but we will probably need to do pair-wise comparisons down the line
 unique_stimuli_pairs <- downloaded_stimuli_trials |>
-  distinct(unique_pair, .keep_all=TRUE) |>
-  rename(text1=english_stimulus_label_target, text2=english_stimulus_label_distractor, text1_description=image_description_target, text2_description=image_description_distractor, image1=local_stimulus_path_target, image2=local_stimulus_path_distractor,dataset_name=dataset_name)
+  rename(text1=english_stimulus_label_target, text2=english_stimulus_label_distractor, text1_description=image_description_target, text2_description=image_description_distractor, image1=local_stimulus_path_target, image2=local_stimulus_path_distractor,dataset_name=dataset_name) |> distinct(unique_pair, image1, image2, text1, .keep_all=TRUE) 
 
 write.csv(unique_stimuli_pairs,file=here("data/peekbank_stimuli.csv"))
 ```
@@ -156,6 +155,8 @@ downloaded_aois <- trials |>
   mutate(accuracy = ifelse(aoi == "target", 1, 0),
     not_looking_away = aoi == "target" | aoi == "distractor",
     accuracy = ifelse(not_looking_away, accuracy, NA))
+
+saveRDS(downloaded_aois, here("intermediates/downloaded_aois.Rds"))
 ```
 
 ```{r}
@@ -281,6 +282,7 @@ summarize_subj_aois <- summarized_data(downloaded_aois |> filter(!is.na(accuracy
 
 #summarizing across subjects for each time point
 summarize_across_subj_aois <- summarized_data(summarize_subj_aois, "t_norm", "mean_accuracy", "t_norm") |> rename(accuracy = mean_value)
+saveRDS(summarize_across_subj_aois, here("intermediates/summarize_across_subj_aois.Rds"))
 
 looking_times <- ggplot(summarize_across_subj_aois,aes(t_norm,accuracy))+
   xlim(-2000,4000)+
@@ -316,48 +318,67 @@ ggplot(summarize_subjects, aes(x = age, y = mean_value)) +
 
 #Loading CLIP and other similarities
 ```{r}
-similarities <- read.csv(here("data", "similarities_data.csv")) |> 
-  mutate(text_similarity = ifelse(grepl("/", text1), NA, text_similarity))
+similarities <- read.csv(here("data", "similarities_data.csv"))
 
-usable_trials_summarized_with_sims <- usable_trials_summarized |> select(-dataset_id, -dataset_name) |>
-  left_join(downloaded_stimuli_trials |> select(trial_type_id, unique_pair, local_stimulus_path_target, local_stimulus_path_distractor, image_description_target, image_description_distractor, target_id, distractor_id), by=c("trial_type_id")) |>
-  left_join(similarities |> select(-trial_type_id, -target_id, -distractor_id), by = c("unique_pair")) |>
-  left_join(administrations |> select("administration_id", "age") )|>
-  group_by(unique_pair) |>
-  # similarity scores are only generated for a single trial type ID so here we're mapping those scores to other trials that have the same image pair 
-  mutate(
-    across(
-      ends_with("similarity"),
-      ~ifelse(is.na(.), first(.[!is.na(.)]), .)
-    )
+pair_key <- function(a, b) paste(pmin(a, b), pmax(a, b), sep = "_")
+
+# --- canonicalize the similarity tables, one per space, keyed by what it depends on ---
+image_sims <- similarities |>
+  transmute(img_key = pair_key(image1, image2), image_similarity) |>
+  distinct()
+
+text_sims <- similarities |>
+  transmute(txt_key = pair_key(text1, text2), text_similarity, ooo_similarity) |>
+  distinct()
+
+# multimodal is anchored to the TARGET text and image (text1, image1), so can't sort
+mm_sims <- similarities |>
+  transmute(mm_key = paste(text1, image1, image2, sep = "_"),
+            multimodal_similarity) |>
+  distinct()
+
+# --- build the trial table with the same keys, then join ---
+usable_trials_imagepair_sims <- usable_trials_summarized |>
+  left_join(
+    downloaded_stimuli_trials |>
+      transmute(trial_type_id,
+                unique_pair,
+                target_id,
+                full_phrase_language,
+                distractor_id,
+                vanilla_trial,
+                original_target_label = original_stimulus_label_target,
+                image1 = local_stimulus_path_target,
+                image2 = local_stimulus_path_distractor,
+                text1  = english_stimulus_label_target,
+                text2  = english_stimulus_label_distractor),
+    by = "trial_type_id"
   ) |>
-  ungroup() 
-
-cols_to_update <- colnames(similarities|> select(-trial_type_id, -target_id, -distractor_id)) 
-usable_trials_imagepair_sims <- usable_trials_summarized_with_sims |>
-  mutate(unique_imagepair = pmap_chr(list(local_stimulus_path_target, local_stimulus_path_distractor), ~ paste(sort(c(.x, .y)), collapse = "_")),
-         unique_textpair = pmap_chr(list(text1, text2), ~ paste(sort(c(.x, .y)), collapse = "_"))) |>
-  group_by(unique_imagepair, unique_textpair) |>
   mutate(
-    across(
-      all_of(cols_to_update),
-      ~ifelse(is.na(.), first(.[!is.na(.)]), .)
-    )) |>
-  ungroup() 
+    img_key = pair_key(image1, image2),
+    txt_key = pair_key(text1, text2),
+    mm_key = paste(text1, image1, image2, sep = "_"),
+  ) |>
+  left_join(image_sims, by = "img_key") |>
+  left_join(text_sims,  by = "txt_key") |>
+  left_join(mm_sims,    by = "mm_key") |>
+  left_join(administrations |> select(administration_id, age), by = "administration_id") |>
+  mutate(trial_key = paste(target_id, distractor_id, sep="_"))
 ```
 
-Filtering out trials which on the Peekbank-side allegedly had images but did not in actuality
+Filtering out trials which did not have any usable trials
 ```{r}
-unusable_trials <- usable_trials_imagepair_sims |> filter(is.na(image_similarity)) |> distinct(unique_pair, .keep_all=TRUE) |> select(dataset_name, unique_pair, target_id, distractor_id, image1, image2)
+unusable_trials <- usable_trials_imagepair_sims |> filter(is.na(image_similarity)) |> distinct(unique_pair, .keep_all=TRUE) |> select(dataset_name, unique_pair, image1, image2, text1, text2, dataset_id)
+unusable_trials
 ```
 
 also filtering out non-vanilla trials and datasets
 ```{r}
 usable_trials_summarized_with_sims <- usable_trials_imagepair_sims |> filter(!is.na(image_similarity))
-# moving this to later in processing for now 
-# non_vanilla_trials <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 0)
-usable_trials_summarized_with_sims <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 1)
-non_vanilla_datasets <- non_vanilla_trials |> distinct(dataset_name) |> anti_join(usable_trials_summarized_with_sims |> distinct(dataset_name))
+# moving vanilla filtering to later in processing so that exploratory analyses are possible
+non_vanilla_trials <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 0)
+vanilla_trials <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 1)
+non_vanilla_datasets <- non_vanilla_trials |> distinct(dataset_name) |> anti_join(vanilla_trials |> distinct(dataset_name))
 non_vanilla_datasets
 ```
 
@@ -389,14 +410,14 @@ print(paste("Total trials covered by THINGS afer replacements:", count(usable_tr
 print(paste("Total target labels:", count(usable_trials_summarized_with_sims |> distinct(text1))))
 
 cat("\nUnique label-target-distractor pairs\n")
-print(paste("Number of unique label-target-distractor pairs:", count(usable_trials_summarized_with_sims |> distinct(image_description_target, image_description_distractor, dataset_name))))
-print(paste("Number of unique label-target-distractor pairs covered by THINGS:", count(usable_trials_summarized_with_sims |> filter(!is.na(ooo_similarity)) |> distinct(image_description_target, image_description_distractor, dataset_name))))
-print(paste("Number of unique label-target-distractor pairs with unique image-target distractor pairs:", count(usable_trials_summarized_with_sims |> distinct(image_description_target, image_description_distractor, image1, image2, dataset_name, full_phrase_language))))
+print(paste("Number of unique label-target-distractor pairs:", count(usable_trials_summarized_with_sims |> distinct(text1, text2, dataset_name))))
+print(paste("Number of unique label-target-distractor pairs covered by THINGS:", count(usable_trials_summarized_with_sims |> filter(!is.na(ooo_similarity)) |> distinct(text1, text2, dataset_name))))
+print(paste("Number of unique label-target-distractor pairs with unique image-target distractor pairs:", count(usable_trials_summarized_with_sims |> distinct(text1, text2, image1, image2, dataset_name, full_phrase_language))))
 print(paste("Number of unique label-target-distractor ids:", count(usable_trials_summarized_with_sims |> distinct(target_id, distractor_id, dataset_name))))
 print(paste("Total label-target-distractor pairs in Peekbank:", count(trial_types |> distinct(target_id, distractor_id))))
 
 cat("\nUnique stimulus pairs\n")
-print(paste("Number of unique image and text pairs:", count(usable_trials_summarized_with_sims |> distinct(unique_textpair, unique_imagepair, full_phrase_language))))
+print(paste("Number of unique image and text pairs:", count(usable_trials_summarized_with_sims |> distinct(txt_key, img_key, full_phrase_language))))
 print(paste("Number of unique stimulus id pairs:", count(usable_trials_summarized_with_sims |> distinct(unique_pair))))
 print(paste("Number of unique image pairs with no usable trials:", count(non_usable_unique_pairs)))
 print(paste("Total unique stimulus id pairs in Peekbank:", count(trial_types |> distinct(unique_pair))))
@@ -411,7 +432,7 @@ print(paste("Total trial types in Peekbank:", count(trial_types |> distinct(tria
 ```{r}
 trial_counts <- clip_data_summarized |>
   #filter(N > 10) |>
-  distinct(image_description_target, image_description_distractor, dataset_name) |>
+  distinct(text1, text2, dataset_name) |>
   summarize(count = n(), .by="dataset_name") |>
   arrange(count)
 

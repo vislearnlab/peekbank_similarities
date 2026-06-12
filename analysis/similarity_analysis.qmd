@@ -19,6 +19,8 @@ source("helpers.R")
 library(ggrepel)
 library(cowplot)
 library(here)
+library(colorspace)
+library(ggeffects)
 ```
 
 # Import data 
@@ -30,8 +32,8 @@ usable_trials_summarized_with_sims <- usable_trials_summarized_with_sims |>
   left_join(aoa_ratings |> transmute(text1=Word, aoa=AoA_Kup_lem)) |>
   left_join(saliency_values, by=c("unique_pair"="ImagePair")) |>
   mutate(age_bucket = cut(age, 
-                          breaks = c(12, 24, 36, 48, 60), 
-                          labels = c("(12-24]", "(24-36]", "(36-48]", "(48-60]"),
+                          breaks = c(12, 18, 24, 36, 48, 60), 
+                          labels = c("(12-18]", "(18-24]", "(24-36]", "(36-48]", "(48-60]"),
                           include.lowest = TRUE))
 
 # rounding each participant to the closest 5
@@ -46,6 +48,16 @@ clip_data_summarized <- summarize_similarity_data_collapsed(usable_trials_summar
 clip_data_summarized_age_bucket <- summarize_similarity_data_collapsed(usable_trials_summarized_with_sims, extra_fields = c("dataset_name", "vanilla_trial", "aoa", "MeanSaliencyDiff", "age_bucket")) |> mutate(
    sim_logit = qlogis(pmin(pmax(image_similarity, 1e-6), 1 - 1e-6))
 )
+
+vanilla <- clip_data_summarized |> filter(vanilla_trial == 1)
+
+sims <- c("image_similarity","text_similarity","multimodal_similarity","ooo_similarity")
+facet_labs <- c(text_similarity       = "Text similarity",
+                image_similarity      = "Image similarity",
+                multimodal_similarity = "Multimodal similarity",
+                ooo_similarity        = "Adult behavioral similarity")
+
+downloaded_aois <- readRDS(here("intermediates/downloaded_aois.Rds"))
 ```
 
 ```{r}
@@ -86,14 +98,70 @@ clip_plots <- generate_multimodal_plots(clip_data_summarized |> filter(vanilla_t
 clip_plots
 ```
 
+```{r fig.width=15, fig.height=15}
+generate_multimodal_plots(vanilla |> filter(N >= 5), "CLIP", title = "all vanilla trials (N >= 5)", size_by_n = TRUE, base_size=16)
+```
+
 ## more multimodal plot visualizations
 ```{r fig.width=15, fig.height=15}
-vanilla <- clip_data_summarized |> filter(vanilla_trial == 1)
 
 generate_multimodal_plots(vanilla, "CLIP", title = "all vanilla trials", size_by_n = TRUE, base_size=16)
 generate_multimodal_plots(vanilla, "CLIP", title = "by dataset",   group_var = "dataset_name", se_alpha=0.2, point_alpha=0.1, show_legend = TRUE, line_alpha=0.4, show_cor=FALSE, overall_line=TRUE, overall_alpha=0.7, base_size=16)
-generate_multimodal_plots(clip_data_summarized, "CLIP", title = "by trial type", group_var = "vanilla_trial", point_alpha=0.1, show_se=TRUE, base_size=16)
-generate_multimodal_plots(clip_data_summarized_age_bucket |> filter(vanilla_trial == 1 & !is.na(age_bucket)), "CLIP", title = "different age buckets", group_var = "age_bucket",  show_se = TRUE, se_alpha = 0.2, point_alpha=0.1, line_alpha = 0.8, line_width=1.1, base_size=16)
+generate_multimodal_plots(clip_data_summarized, "CLIP", title = "different trial types", group_var = "vanilla_trial", point_alpha=0.1, show_se=TRUE, base_size=16)
+generate_multimodal_plots(clip_data_summarized_age_bucket |> filter(vanilla_trial == 1 & !is.na(age_bucket) & N>=5), "CLIP", title = "different age buckets (N>=5)", group_var = "age_bucket",  show_se = TRUE, se_alpha = 0.2, point_alpha=0.1, line_alpha = 0.8, line_width=1.1, base_size=16)
+```
+
+## By age
+```{r}
+plot_data_age <- clip_data_summarized_age_bucket |>
+  pivot_longer(all_of(sims), names_to = "sim_type", values_to = "similarity") |>
+  mutate(sim_type = factor(sim_type, levels = sims)) 
+
+ggplot(
+  plot_data_age |> filter(!is.na(age_bucket)),
+  aes(
+    similarity,
+    mean_value,
+    colour = age_bucket,
+    fill = age_bucket
+  )
+) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(alpha = 0.1, size = 2) +
+  
+  stat_smooth(
+    method = "lm",
+    se = TRUE,
+    aes(fill = age_bucket),
+    alpha = 0.15   # ribbon alpha
+  ) +
+
+  stat_smooth(
+    method = "lm",
+    se = FALSE,
+    linewidth = 1.2
+  ) +
+  facet_wrap(
+    ~ sim_type,
+    nrow = 2,
+    scales = "free_x",
+    labeller = labeller(sim_type = facet_labs),
+    strip.position = "top"
+  ) +
+  scale_color_discrete_qualitative(palette = "Set 3") +
+  labs(
+    x = "Target–distractor similarity",
+    y = "Proportion target looking in critical window",
+    colour = "Age bucket"
+  ) +
+  guides(fill = "none") +
+  theme_classic(base_size = 16) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 20),
+    panel.spacing = unit(1, "lines"),
+    plot.margin = margin(t = 5.5, r = 30, b = 5.5, l = 5.5, unit = "pt")
+  )
 ```
 
 ## comparing all IVs
@@ -123,15 +191,102 @@ p <- ggpairs(
 
 p
 ```
-lots of interesting colinear effects here with AoA and mean saliency..
+so many interesting colinear effects here with AoA and mean saliency..
 
+```{r}
+# Load required libraries
+library(ggcorrplot)
+library(Hmisc) # Required for computing p-values
+
+# 1. Prepare and rename your data
+confusability_vars <- clip_data_summarized |>
+  filter(vanilla_trial == 1) |>
+  transmute(
+  #  mean_value = scale(mean_value)[, 1],
+    image_similarity = scale(image_similarity)[, 1],
+    text_similarity = scale(text_similarity)[, 1],
+    multimodal_similarity = scale(multimodal_similarity)[, 1],
+    ooo_similarity = scale(ooo_similarity)[, 1],
+    aoa = scale(aoa)[, 1],
+    MeanSaliencyDiff = scale(MeanSaliencyDiff)[, 1]
+  ) |>
+  # RENAME YOUR PREDICTORS HERE:
+  # Format: "New Name" = old_name
+  rename(
+   # "Critical window looking"            = mean_value,
+    "Image similarity"      = image_similarity,
+    "Text similarity"       = text_similarity,
+    "Multimodal similarity" = multimodal_similarity,
+    "Adult behavioral similarity"        = ooo_similarity,
+    "Estimated target age of acquisition"    = aoa,
+    "Saliency difference"    = MeanSaliencyDiff
+  )
+
+cor_data <- rcorr(as.matrix(confusability_vars), type = "spearman")
+
+# 3. Flatten matrices into a long dataframe for ggplot
+r_df <- as.data.frame(cor_data$r) %>% 
+  rownames_to_column(var = "Var1") %>% 
+  pivot_longer(-Var1, names_to = "Var2", values_to = "r")
+
+p_df <- as.data.frame(cor_data$P) %>% 
+  rownames_to_column(var = "Var1") %>% 
+  pivot_longer(-Var1, names_to = "Var2", values_to = "p")
+
+# Combine r and p data, and create the significance star labels
+plot_data <- left_join(r_df, p_df, by = c("Var1", "Var2")) %>%
+  # Fill diagonal p-values (which are NA) with 1 so they don't trigger stars
+  mutate(p = ifelse(Var1 == Var2, 1, p)) %>% 
+  mutate(
+    stars = case_when(
+      p < 0.001 ~ "***",
+      p < 0.01  ~ "**",
+      p < 0.05  ~ "*",
+      TRUE      ~ ""
+    ),
+    # Combine the correlation number and stars into one text label
+    label_text = paste0(round(r, 2), stars)
+  )
+
+# 4. Filter to get only the LOWER half of the square matrix
+# We convert variables to factors to respect the order of our dataframe
+vars_order <- colnames(confusability_vars)
+plot_data <- plot_data %>%
+  mutate(
+    Var1 = factor(Var1, levels = vars_order),
+    Var2 = factor(Var2, levels = vars_order)
+  ) %>%
+  filter(as.integer(Var1) > as.integer(Var2)) # Removes diagonal and upper triangle
+
+# 5. Build the Heatmap using ggplot2
+ggplot(plot_data, aes(x = Var2, y = Var1, fill = r)) +
+  geom_tile(color = "white") +
+  # Add the correlation values and significance stars combined
+  geom_text(aes(label = label_text), size = 3.5, color = "black") +
+  # Define the diverging color palette (Negative, Neutral, Positive)
+  scale_fill_gradient2(
+    low = "#6D9EC1", mid = "white", high = "#E46726", 
+    midpoint = 0, limit = c(-1, 1), space = "Lab", 
+    name = "Spearman\ncorrelation"
+  ) +
+  theme_bw() +
+  labs(title = "Correlation of looking behavior predictors", x = NULL, y = NULL) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    panel.grid.major = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks = element_blank()
+  )
+ggsave(here("figures/correlation.png"))
+```
 
 # Analysis across age
 ```{r}
+library(dplyr)
 calculate_correlations <- function(data, x_var, y_var, group_var = c("rounded_age"), conf_level = 0.95) {
   data |>
-    group_by(across(all_of(group_var))) |>
-    summarize(
+    dplyr::group_by(across(all_of(group_var))) |>
+    dplyr::summarize(
       {
         cor_test <- cor.test(.data[[x_var]], .data[[y_var]], method = "pearson", conf.level = conf_level)
         tibble(
@@ -162,7 +317,7 @@ sim_age_plot <- function(data) {
     scale_color_brewer(palette = "Set1", name = "Similarity type") 
 }
 
-# can't figure out what values to filter to here.
+# can't figure out what values to filter to here?
 clip_data_age_summarized <- summarize_similarity_data_collapsed(age_based_trials |> filter(vanilla_trial == 1), extra_fields = c("rounded_age", "dataset_name")) |> filter(N >= 5) |> group_by(rounded_age) |>
   filter(n() >= 5) |>
   ungroup()
@@ -183,7 +338,65 @@ ggplot(clip_age_cors, aes(x = rounded_age, y = pearson_cor)) +
   theme_minimal() +
   theme(legend.position = "none")
 ```
+# time
+```{r}
+library(tidyr)
+crit <- qnorm(0.975)
 
+# one row per trial type, median-split within each similarity dimension
+sims_long <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 1) |>
+  select(trial_type_id, ends_with("_similarity")) |>
+  distinct() |>
+  pivot_longer(ends_with("_similarity"),
+               names_to = "sim_type", values_to = "similarity") |>
+  filter(!is.na(similarity)) |>
+  group_by(sim_type) |>
+  mutate(sim_split = if_else(similarity >= median(similarity, na.rm = TRUE),
+                             "high", "low")) |>
+  ungroup() |>
+  mutate(sim_type = sub("_similarity$", "", sim_type))
+
+aoi_base <- downloaded_aois |>
+  filter(!is.na(accuracy), trial_type_id %in% sims_long$trial_type_id)
+
+# fan out: each timepoint contributes to its high/low bucket in each dimension
+aoi_split <- aoi_base |>
+  left_join(sims_long, by = "trial_type_id", relationship = "many-to-many")
+
+# subject means per condition x time, then across-subject mean + 95% CI
+across_split <- aoi_split |>
+  group_by(sim_type, sim_split, administration_id, t_norm) |>
+  summarise(mean_accuracy = mean(accuracy, na.rm = TRUE), .groups = "drop") |>
+  group_by(sim_type, sim_split, t_norm) |>
+  summarise(accuracy = mean(mean_accuracy, na.rm = TRUE),
+            ci = crit * sd(mean_accuracy, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop") |>
+  mutate(condition = paste(sim_type, sim_split))
+
+summarize_across_subj_aois <- readRDS(here("intermediates/summarize_across_subj_aois.Rds"))
+# the existing overall line as the 9th condition
+plot_df <- bind_rows(
+  across_split |> select(t_norm, accuracy, ci, condition),
+  summarize_across_subj_aois |> mutate(condition = "Overall") |>
+    select(t_norm, accuracy, ci, condition)
+) |>
+  mutate(condition = forcats::fct_relevel(condition, "Overall"))
+
+looking_times <- ggplot(plot_df, aes(t_norm, accuracy,
+                                      colour = condition, fill = condition)) +
+  xlim(-2000, 4000) +
+  geom_errorbar(aes(ymin = accuracy - ci, ymax = accuracy + ci),
+                width = 0, alpha = 0.15) +
+  geom_smooth(method = "gam", se = FALSE, linewidth = 1) +
+  geom_vline(xintercept = 0, size = 1.5) +
+  geom_hline(yintercept = 0.5, size = 1.2, linetype = "dashed") +
+  geom_vline(xintercept = 300, linetype = "dotted") +
+  ylim(0, 1) +
+  xlab("Time (normalized to target word onset) in ms") +
+  ylab("Proportion Target Looking") +
+  labs(colour = "Condition", fill = "Condition")
+looking_times
+```
 
 # stats
 
@@ -194,13 +407,26 @@ library(glmmTMB)
 library(MuMIn)
 library(broom.mixed)
 model_data <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 1)
-sims <- c("image_similarity","text_similarity","multimodal_similarity","ooo_similarity")
+model_data_scaled <- model_data |> 
+  mutate(
+    # Scale your response variable but keep the original for plotting later
+    scaled_response = as.vector(scale(mean_target_looking_critical_window)),
+    scaled_age = as.vector(scale(age)),
+    scaled_aoa = as.vector(scale(aoa)),
+    scaled_saliency_diff = as.vector(scale(MeanSaliencyDiff))
+  ) |> 
+  # Dynamic scaling for your various similarity columns
+  mutate(across(all_of(sims), ~as.vector(scale(.x)), .names = "scaled_{.col}"))
+
 fit_main <- function(sim,
                      data = model_data,
                      response = "mean_target_looking_critical_window",
                      added_structure = NULL, pruned_model=FALSE) {
   terms <- c(
     sprintf("scale(%s)*scale(age)", sim),
+    "scale(aoa)",
+    "scale(MeanSaliencyDiff)",
+    "(1 | original_target_label:img_key)",
     "(1 | dataset_id)"
   )
   if (pruned_model) {
@@ -218,11 +444,36 @@ fit_main <- function(sim,
   lmer(f, data = data)
 }
 
+fit_main_scaled <- function(sim, data = model_data_scaled, pruned_model = FALSE) {
+  
+  # Use the pre-scaled variable names
+  terms <- c(
+    sprintf("scaled_%s * scaled_age", sim),
+    "scaled_aoa",
+    "scaled_saliency_diff",
+    "(1 | original_target_label:img_key)",
+    "(1 | dataset_id)"
+  )
+  
+  if (pruned_model) {
+    terms <- c(terms, "(1 | subject_id)")
+  } else {
+    terms <- c(terms, sprintf("(1 + scaled_%s | subject_id)", sim))
+  }
+  
+  # Response is already pre-scaled
+  f <- reformulate(terms, response = "scaled_response")
+  
+  lmer(f, data = data)
+}
+
 mods <- lapply(sims, fit_main); names(mods) <- sims
+mods_scaled <- lapply(sims, fit_main_scaled); names(mods_scaled) <- sims
 lapply(mods, function(m) m@optinfo$conv$lme4$messages)
 lapply(mods, function(m) summary(m))
 r.squaredGLMM(mods$image_similarity)
 ```
+
 Trying to see why text and multimodal similarity models were singular.
 ```{r}
 vars <- c("image_similarity", "text_similarity", "multimodal_similarity",
@@ -238,23 +489,75 @@ sum(complete.cases(model_data[vars]))
 # rows complete without requiring ooo
 sum(complete.cases(model_data[setdiff(vars, "ooo_similarity")]))
 ```
+
+```{r}
+library(ggeffects)
+mu  <- mean(model_data$mean_target_looking_critical_window, na.rm = TRUE)
+sig <- sd(model_data$mean_target_looking_critical_window, na.rm = TRUE)
+
+all_predictions <- lapply(sims, function(sim) {
+  term_name <- sim
+  
+  # Generate prediction
+  pred <- ggpredict(mods[[sim]], terms = term_name)
+  
+  # Label it so we know which facet it belongs to
+  pred$sim_type <- paste(gsub("_", " ", sim))
+  return(pred)
+})
+
+combined_main_preds <- do.call(rbind, all_predictions)
+
+combined_main_preds$predicted_raw <- combined_main_preds$predicted * sig + mu
+combined_main_preds$conf.low_raw  <- combined_main_preds$conf.low  * sig + mu
+combined_main_preds$conf.high_raw <- combined_main_preds$conf.high * sig + mu
+
+ggplot(
+  combined_main_preds, 
+  aes(x = x, y = predicted_raw)
+) +
+  # Confidence intervals ribbon
+  geom_ribbon(
+    aes(ymin = conf.low_raw, ymax = conf.high_raw), 
+    alpha = 0.15, 
+    fill = "steelblue"
+  ) +
+  # Main effect prediction line
+  geom_line(
+    linewidth = 1.2, 
+    color = "steelblue"
+  ) +
+  # 50% chance line (useful for target looking paradigms)
+  geom_hline(
+    yintercept = 0.5, 
+    linetype = "dashed", 
+    alpha = 0.5
+  ) +
+  # Separate into 4 panels side-by-side / wrapped
+  facet_wrap(~ sim_type, scales = "free_x") +
+  labs(
+    title = "Main similarity predictors",
+    subtitle = "Critical Window Predictions",
+    x = "Target-distractor similarity",
+    y = "Predicted Proportion Target Looking"
+  ) +
+  theme_classic() +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold", size = 11)
+  )
+```
+
 ### getting rid of singular effects
 getting rid of singular effects 
 ```{r}
 pruned_text_model <- lmer(scale(mean_target_looking_critical_window) ~ scale(text_similarity)*scale(age)
                     + scale(aoa) + scale(MeanSaliencyDiff)
                     + (1 | subject_id)
-                    + (1 | text1:unique_pair)
+                    + (1 | original_target_label:img_key)
                     + (1 | dataset_id), data = model_data)
 
-pruned_multimodal_model <- lmer(scale(mean_target_looking_critical_window) ~ scale(multimodal_similarity)*scale(age)
-                    + scale(aoa) + scale(MeanSaliencyDiff)
-                    + (1 | subject_id)
-                    + (1 | text1:unique_pair)
-                    + (1|dataset_id), data = model_data)
-
 summary(pruned_text_model)
-summary(pruned_multimodal_model)
 ```
 
 ### model comparison
@@ -269,8 +572,8 @@ fit_common <- function(sim, data=dat_cc) {
   f <- reformulate(
     c(sprintf("scale(%s)*scale(age)", sim),
       "scale(aoa)", "scale(MeanSaliencyDiff)",
-      "(1 | administration_id)",
-      "(1 | text1:unique_pair)",
+      "(1 | subject_id)",
+      "(1 | original_target_label:img_key)",
       "(1 | dataset_id)"),
     response = "scale(mean_target_looking_critical_window)")
   lmer(f, data = dat_cc, REML = FALSE)
@@ -288,7 +591,9 @@ Image similarity model comes out on top.
 
 ## including non-vanilla trials
 ```{r}
-mods_all <- lapply(sims, fit_main, usable_trials_summarized_with_sims); names(mods_all) <- sims
+model_data_all <- usable_trials_summarized_with_sims |>
+  mutate(vanilla_trial = ifelse(vanilla_trial==1, 0.5, -0.5))
+mods_all <- lapply(sims, fit_main, model_data_all, added_structure="scale(vanilla_trial)"); names(mods_all) <- sims
 lapply(mods_all, function(m) m@optinfo$conv$lme4$messages)
 lapply(mods_all, function(m) summary(m))
 ```
@@ -305,22 +610,410 @@ effect stays and with a pretty robust random effects structure and with an inter
 
 ## including baseline window as covariate
 ```{r}
-baseline_data <- model_data |> filter(min_time <= -500)
+baseline_data <- model_data |> filter(min_time <= -500) # getting rid of 5 individual trials ha
 
-mods_baseline_covariate <-  lapply(sims, fit_main, data=baseline_data, added_structure="mean_target_looking_baseline_window", pruned_model=TRUE); names(mods_baseline_covariate) <- sims
+mods_baseline_covariate <-  lapply(sims, fit_main, data=baseline_data, added_structure="scale(mean_target_looking_baseline_window)", pruned_model=TRUE); names(mods_baseline_covariate) <- sims
 lapply(mods_baseline_covariate, function(m) summary(m))
 ```
 
 ## predicting baseline corrected looking
 ```{r}
-mods_baseline_corrected <-  lapply(sims, fit_main, data=baseline_data, response="corrected_target_looking", pruned_model=TRUE); names(mods_baseline_corrected) <- sims
+mods_baseline_corrected <-  lapply(sims, fit_main, data=baseline_data, response="corrected_target_looking"); names(mods_baseline_corrected) <- sims
+lapply(mods_baseline_corrected, function(m) m@optinfo$conv$lme4$messages)
 lapply(mods_baseline_corrected, function(m) summary(m))
+```
+## predicting window type
+```{r}
+baseline_data_window_type <- baseline_data |> pivot_longer(cols=c(mean_target_looking_critical_window, mean_target_looking_baseline_window), names_to="window_type", values_to="target_looking") |>
+  mutate(window_type = str_replace(window_type, "mean_target_looking_", "")) |>
+  mutate(trial_window_c = case_when(
+    window_type=="critical_window" ~ 0.5,
+    window_type=="baseline_window" ~ -0.5))
+mods_baseline_window_type <- lapply(sims, function(sim) {
+
+  fit_main(
+    sim = sim,
+    data = baseline_data_window_type,
+    response = "target_looking",
+    pruned_model = TRUE,
+    added_structure = sprintf("scale(trial_window_c) * scale(%s)", sim)
+  )
+
+}); 
+names(mods_baseline_window_type) <- sims
+lapply(mods_baseline_window_type, function(m) m@optinfo$conv$lme4$messages)
+lapply(mods_baseline_window_type, function(m) summary(m))
+```
+I mean these are all interesting, sure.
+
+```{r}
+# 1. Define models and scale constants
+mm    <- mods_baseline_window_type[[3]] 
+ooo   <- mods_baseline_window_type[[4]] 
+text  <- mods_baseline_window_type[[2]] 
+image <- mods_baseline_window_type[[1]] 
+
+mu  <- mean(baseline_data_window_type$target_looking, na.rm = TRUE)
+sig <- sd(baseline_data_window_type$target_looking, na.rm = TRUE)
+
+# 2. Generate predictions (using unique variable names)
+pred_mm    <- ggpredict(mm, terms = c("multimodal_similarity", "trial_window_c [-0.5, 0.5]"))
+pred_ooo   <- ggpredict(ooo, terms = c("ooo_similarity", "trial_window_c [-0.5, 0.5]"))
+pred_text  <- ggpredict(text, terms = c("text_similarity", "trial_window_c [-0.5, 0.5]"))
+pred_image <- ggpredict(image, terms = c("image_similarity", "trial_window_c [-0.5, 0.5]"))
+
+# 3. Add a source/type label to each dataframe
+pred_mm$sim_type    <- "Multimodal similarity"
+pred_ooo$sim_type   <- "Adult behavioral similarity"
+pred_text$sim_type  <- "Text similarity"
+pred_image$sim_type <- "Image similarity"
+
+# 4. Combine all predictions into one dataframe
+combined_preds <- rbind(pred_mm, pred_ooo, pred_text, pred_image)
+
+combined_preds$sim_type <- factor(
+  combined_preds$sim_type,
+  levels = c(
+    "Image similarity",
+    "Text similarity",
+    "Multimodal similarity",
+    "Adult behavioral similarity"
+  )
+)
+
+# 5. Un-scale / Back-transform the predicted values and confidence intervals
+combined_preds$predicted_raw <- combined_preds$predicted * sig + mu
+combined_preds$conf.low_raw  <- combined_preds$conf.low  * sig + mu
+combined_preds$conf.high_raw <- combined_preds$conf.high * sig + mu
+
+# 6. Create the Faceted Plot
+baseline_interaction_plot <- ggplot(
+  combined_preds,
+  aes(x = x, y = predicted_raw, colour = group, fill = group)
+) +
+  geom_ribbon(
+    aes(ymin = conf.low_raw, ymax = conf.high_raw),
+    alpha = 0.15,
+    colour = NA
+  ) +
+  geom_line(linewidth = 1.2) +
+  geom_hline(
+    yintercept = 0.5,
+    linetype = "dashed",
+    alpha = 0.7
+  ) +
+  # This splits your plot into 4 facets based on similarity type
+  facet_wrap(~ sim_type, scales = "free_x") + 
+  labs(
+    title = "Effect of similarities by trial window type",
+    x = "Target-distractor similarity",
+    y = "Predicted proportion target looking",
+    colour = "Trial window",
+    fill = "Trial window"
+  ) +
+  scale_color_discrete(
+    labels = c("Baseline window", "Critical window")
+  ) +
+  scale_fill_discrete(
+    labels = c("Baseline window", "Critical window")
+  ) +
+  theme_classic() +
+  theme(
+    strip.background = element_blank(), # Cleans up facet header backgrounds
+    strip.text = element_text(face = "bold", size = 11), # Emphasizes facet titles
+    legend.position = "bottom" # Optional: Moves legend to bottom for wider facet viewing
+  )
+ggsave(here("figures/baseline_interaction.png"), baseline_interaction_plot)
+```
+
+## baseline window looking?
+```{r}
+mods_baseline_looking <-  lapply(sims, fit_main, data=baseline_data, response="mean_target_looking_baseline_window"); names(mods_baseline_looking) <- sims
+lapply(mods_baseline_looking, function(m) m@optinfo$conv$lme4$messages)
+lapply(mods_baseline_looking, function(m) summary(m))
 ```
 
 ## Under 3 years old
 LWL specific ages and AoA?
 ```{r}
-mods_younger <-  lapply(sims, fit_main, data=model_data |> filter(age < 36), response="corrected_target_looking", pruned_model=TRUE); names(mods_younger) <- sims
+mods_younger <-  lapply(sims, fit_main, data=model_data |> filter(age <= 24)); names(mods_younger) <- sims
+lapply(mods_younger, function(m) m@optinfo$conv$lme4$messages)
 lapply(mods_younger, function(m) summary(m))
 ```
-AoA effect is significant here which makes some intuitive sense.
+this makes me think of the cascading age prediction..younger kids: image similarity, older kids: multimodal, even older kids: text only?
+
+Adult behavioral similarity is significant here..AoA effects only appear between 24 and 36 months.
+
+
+# Conference plots
+todo: make sure models used are not singular
+
+## unscaled
+```{r}
+plot_data <- vanilla |>
+  pivot_longer(all_of(sims), names_to = "sim_type", values_to = "similarity") |>
+  mutate(sim_type = factor(sim_type, levels = sims))   # controls panel order
+
+# ---- lmer prediction lines, one stacked data frame ---------------------------
+pred <- bind_rows(lapply(sims, function(s) {
+  m  <- mods[[s]]
+  mf <- model.frame(m)                      # only the rows lmer kept
+  # raw similarity range as the model saw it (mf stores the scaled column)
+  scol <- mf[[grep(paste0("scale\\(", s), names(mf))]]
+  raw  <- as.vector(scol) * attr(scol, "scaled:scale") + attr(scol, "scaled:center")
+  x    <- seq(min(raw), max(raw), length.out = 150)
+  d  <- model_data
+  nd <- data.frame(x,
+                   age = mean(d$age, na.rm = TRUE),
+                   aoa = mean(d$aoa, na.rm = TRUE),
+                   MeanSaliencyDiff = mean(d$MeanSaliencyDiff, na.rm = TRUE))
+  names(nd)[1] <- s
+
+  pr <- predict(m, newdata = nd, re.form = NA, se.fit = TRUE)
+
+  rcol <- mf[[1]]
+  rc <- attr(rcol, "scaled:center"); rs <- attr(rcol, "scaled:scale")
+
+  data.frame(sim_type = s, similarity = x,
+             y     =  pr$fit                     * rs + rc, # un-zscoring
+             lower = (pr$fit - 1.96 * pr$se.fit) * rs + rc,
+             upper = (pr$fit + 1.96 * pr$se.fit) * rs + rc)
+})) |> mutate(sim_type = factor(sim_type, levels = sims))
+
+library(colorspace)
+
+fig <- ggplot(plot_data, aes(similarity, mean_value,
+                             colour = dataset_name, fill = dataset_name)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(size = 3, alpha = 0.1) +
+  stat_smooth(method = "glm", geom = "line", alpha = 0.4, linewidth = 1) +
+  # lmer population line + CI
+  geom_ribbon(data = pred, inherit.aes = FALSE,
+              aes(x = similarity, ymin = lower, ymax = upper),
+              fill = "black", alpha = 0.15) +
+  geom_line(data = pred, inherit.aes = FALSE,
+            aes(x = similarity, y = y),
+            colour = "black", alpha = 0.7, linewidth = 1.2) +
+  facet_wrap(~ sim_type, nrow = 2, scales = "free_x",
+             labeller = labeller(sim_type = facet_labs),
+             strip.position = "top") +          # strips read as x-axis titles
+  scale_y_continuous(breaks = seq(0, 1, 0.2)) +
+  coord_cartesian(ylim = c(0, 1)) +
+  scale_color_discrete_qualitative(palette="Set 2") +
+  #scale_color_manual(values = colorRampPalette(brewer.pal(8, "Dark2"))(24)) +
+  labs(x = "Target–distractor similarity",
+       y = "Proportion target looking in critical window",
+       colour = "Dataset Name", fill = "Dataset Name") +
+  theme_classic(base_size=16) +
+  theme(legend.position = "bottom",
+        #strip.placement = "outside",
+        strip.text = element_text(size = 20),
+         panel.spacing = unit(1, "lines"),
+        plot.margin = margin(t = 5.5, r = 30, b = 5.5, l = 5.5, unit = "pt"))
+
+ggsave(here("figures", "dataset_similarities.png"),
+       fig, width = 16, height = 13, bg = "white")
+fig
+```
+
+```{r}
+library(ggeffects)
+library(purrr)
+library(dplyr)
+
+# Grab original scales ONLY for back-transforming the Y axis
+y_mean <- mean(model_data_scaled$mean_target_looking_critical_window, na.rm = TRUE)
+y_sd   <- sd(model_data_scaled$mean_target_looking_critical_window, na.rm = TRUE)
+
+pred_scaled <- map_dfr(sims, function(s) {
+  res <- ggpredict(mods_scaled[[s]], terms = sprintf("scaled_%s [all]", s))
+  
+  res |> 
+    as.data.frame() |> 
+    transmute(
+      sim_type   = s,
+      similarity = x,                            # Keep X as the Z-score (-2 to +2 range)
+      y          = (predicted * y_sd) + y_mean,  # Un-scale Y to 0-1
+      lower      = (conf.low * y_sd) + y_mean,   # Un-scale CI lower
+      upper      = (conf.high * y_sd) + y_mean   # Un-scale CI upper
+    )
+}) |> 
+  mutate(sim_type = factor(sim_type, levels = sims))
+```
+
+## scaled?
+```{r}
+# Note: replace "scaled_similarity" with whatever name your pre-scaled x-variable 
+# column has in your main 'plot_data' data frame.
+clip_data_summarized_scaled <- summarize_similarity_data_collapsed_scaled(model_data_scaled, extra_fields = c("dataset_name"))
+clip_data_summarized_scaled_bucket <- summarize_similarity_data_collapsed_scaled(model_data_scaled, extra_fields = c("dataset_name", "age_bucket"))
+
+plot_data_scaled <- clip_data_summarized_scaled |>
+    rename_with(~ gsub("scaled_", "", .x)) |>
+  pivot_longer(
+    cols = all_of(sims),
+    names_to = "sim_type",
+    values_to = "similarity"
+  ) |>
+  mutate(
+    sim_type = factor(sim_type, levels = sims)
+  )
+
+
+fig <- ggplot(plot_data_scaled, aes(similarity, mean_value, 
+                             colour = dataset_name, fill = dataset_name)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(size = 3, alpha = 0.1) +
+  stat_smooth(method = "glm", geom = "line", alpha = 0.5, linewidth = 1) +
+  
+  # lmer population line + CI
+  geom_ribbon(data = pred_scaled, inherit.aes = FALSE,
+              aes(x = similarity, ymin = lower, ymax = upper),
+              fill = "black", alpha = 0.15) +
+  geom_line(data = pred, inherit.aes = FALSE,
+            aes(x = similarity, y = y),
+            colour = "black", alpha = 0.7, linewidth = 1.2) +
+  
+  facet_wrap(~ sim_type, nrow = 2, scales = "free_x",                        
+             labeller = labeller(sim_type = facet_labs),
+             strip.position = "top") +         
+  scale_y_continuous(breaks = seq(0, 1, 0.2)) +
+  coord_cartesian(ylim = c(0, 1)) +
+  scale_color_discrete_qualitative(palette="Set 2") +
+  labs(x = "Target–distractor similarity (z-scored)", 
+       y = "Proportion target looking in critical window",
+       colour = "Dataset Name", fill = "Dataset Name") +
+  theme_classic(base_size=16) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 20),
+        panel.spacing = unit(1, "lines"),
+        plot.margin = margin(t = 5.5, r = 30, b = 5.5, l = 5.5, unit = "pt"))
+ggsave(here("figures", "dataset_similarities_zscored.png"),
+       fig, width = 16, height = 13, bg = "white")
+ggsave(here("figures", "dataset_similarities_zscored.svg"),
+       fig, width = 16, height = 13, device="pdf")
+```
+
+
+## age
+todo: ensure models used are not singular.
+```{r}
+model_data_age <- model_data_scaled |> 
+  filter(!is.na(age_bucket))
+
+### 2. Fit Individual Models using Scaled Data
+mods_age <- expand_grid(
+  sim = sims,
+  age_bucket = unique(model_data_age$age_bucket)
+) |>
+  mutate(
+    model = map2(sim, age_bucket, ~
+      fit_main(
+        sim = .x,
+        data = model_data_age |> filter(age_bucket == .y)
+      )
+    ),
+    name = paste(sim, age_bucket, sep = "__")
+  )
+
+# Convert into a named list of models
+mods_age <- setNames(mods_age$model, mods_age$name)
+
+# Note: Ensure 'model_data_age' holds the unscaled target variable, 
+# or use your original unscaled base data frame here.
+y_mean <- mean(model_data_age$mean_target_looking_critical_window, na.rm = TRUE)
+y_sd   <- sd(model_data_age$mean_target_looking_critical_window, na.rm = TRUE)
+
+
+# 2. Re-build the prediction grid, handling scaled predictors and un-scaling outcomes
+pred <- map_dfr(names(mods_age), function(nm) {
+  m     <- mods_age[[nm]]
+  parts <- strsplit(nm, "__")[[1]]
+  st    <- parts[1]   # Similarity type (sim)
+  ab    <- parts[2]   # Age bucket
+  
+  # Find the scaled similarity term used in this specific model
+  sim_col <- grep("scaled_.*_similarity$", all.vars(formula(m)), value = TRUE)
+  if(length(sim_col) == 0) {
+    # Fallback if your scaled variables don't strictly follow that exact pattern
+    sim_col <- grep("_similarity$", all.vars(formula(m)), value = TRUE)
+  }
+  
+  # Generate predictions based on the z-scored term
+  ggpredict(m, terms = paste0(sim_col, " [all]")) |>
+    as.data.frame() |>
+    transmute(
+      sim_type   = st, 
+      age_bucket = ab,
+      similarity = x,                         # Keep X as the Z-score (-2 to +2 range)
+      y          = (predicted * y_sd) + y_mean,  # Un-scale Y to 0-1
+      lower      = (conf.low * y_sd) + y_mean,   # Un-scale CI lower
+      upper      = (conf.high * y_sd) + y_mean   # Un-scale CI upper
+    )
+}) |> 
+  mutate(sim_type = factor(sim_type, levels = sims))
+```
+
+
+```{r}
+# Note: Ensure plot_data_age_scaled has its similarity values z-scored 
+# but uses the uniform column name 'similarity' after pivoting.
+
+plot_data_scaled_bucket <- clip_data_summarized_scaled_bucket |>
+    rename_with(~ gsub("scaled_", "", .x)) |>
+  pivot_longer(
+    cols = all_of(sims),
+    names_to = "sim_type",
+    values_to = "similarity"
+  ) |>
+  mutate(
+    sim_type = factor(sim_type, levels = sims)
+  )
+
+age_scaled_plot <- ggplot(
+  plot_data_scaled_bucket |> filter(!is.na(age_bucket)),
+  aes(similarity, mean_value, colour = age_bucket, fill = age_bucket)
+) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(alpha = 0.12, size = 2) +
+  
+  # lmer population ribbon + lines split/colored by age_bucket
+  geom_ribbon(
+    data = pred |> filter(!is.na(age_bucket)),
+    aes(x = similarity, ymin = lower, ymax = upper, fill = age_bucket),
+    inherit.aes = FALSE, alpha = 0.2, colour = NA
+  ) +
+  geom_line(
+    data = pred |> filter(!is.na(age_bucket)),
+    aes(x = similarity, y = y, colour = age_bucket),
+    inherit.aes = FALSE, linewidth = 1.2
+  ) +
+  
+  facet_wrap(
+    ~ sim_type,
+    nrow = 2,
+    scales = "free_x",
+    labeller = labeller(sim_type = facet_labs),
+    strip.position = "top"
+  ) +
+  scale_y_continuous(breaks = seq(0, 1, 0.2)) +
+  coord_cartesian(ylim = c(0, 1)) +
+  scale_color_viridis_d(option = "mako", direction=-1, begin=0.15, end=0.7) +  
+  scale_fill_viridis_d(option="mako", direction=-1, begin=0.15, end=0.7) +
+  labs(
+    x = "Target–distractor similarity (z-scored)",
+    y = "Proportion target looking in critical window",
+    colour = "Age bucket",
+    fill = "Age bucket"
+  ) +
+  theme_classic(base_size = 16) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 20),
+    panel.spacing = unit(1, "lines"),
+    plot.margin = margin(t = 5.5, r = 30, b = 5.5, l = 5.5, unit = "pt")
+  )
+
+ggsave(here("figures", "age_similarities_zscored.png"),
+       age_scaled_plot, width = 15, height = 13, bg = "white")
+```

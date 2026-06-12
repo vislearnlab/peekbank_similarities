@@ -2,8 +2,8 @@
 summarized_data <- function(data, x_var, y_var, group_var = NULL) {
   group_cols <- unique(c(x_var, group_var))  # dedup if same
   return(data |>
-           group_by(across(all_of(group_cols))) |>
-           summarize(
+           dplyr::group_by(across(all_of(group_cols))) |>
+           dplyr::summarize(
              mean_value = mean(.data[[y_var]], na.rm = TRUE),
              sd_value = sd(.data[[y_var]], na.rm = TRUE),
              N = n(),
@@ -110,14 +110,28 @@ round_to_nearest <- function(x, round_to=3) {
   round(x / round_to) * round_to
 }
 
-summarize_similarity_data_collapsed <- function(data, extra_fields=NULL) {
-  group_vars = c("unique_pair", "image_description_target", "image_description_distractor", "text_similarity", "image_similarity", "ooo_similarity", "multimodal_similarity")
+summarize_similarity_data_collapsed_scaled <- function(data, extra_fields=NULL) {
+  group_vars = c("original_target_label", "img_key","scaled_text_similarity", "scaled_image_similarity", "scaled_ooo_similarity", "scaled_multimodal_similarity")
   if (!is.null(extra_fields)) {
     group_vars = c(group_vars, extra_fields)
   }
   return(summarized_data(
     data,
-    "unique_pair", 
+    "trial_key", 
+    "mean_target_looking_critical_window", 
+    group_vars
+  ))
+}
+
+summarize_similarity_data_collapsed <- function(data, extra_fields=NULL) {
+  group_vars = c("original_target_label", "img_key", "text_similarity", "image_similarity", "ooo_similarity", "multimodal_similarity")
+  if (!is.null(extra_fields)) {
+    group_vars = c(group_vars, extra_fields)
+  }
+  return(summarized_data(
+    data,
+    # fix what this key is?
+    "trial_key", 
     "mean_target_looking_critical_window", 
     group_vars
   ))
@@ -165,7 +179,7 @@ generate_multimodal_plots <- function(data, model_type, suffix = "", title = "",
     here("figures", paste0(model_type, "_",
                            paste(strsplit(title, " ")[[1]], collapse = "_"),
                            group_tag, size_tag, "_similarities.png")),
-    grid, base_width = 10, base_height = 13, bg = "white")
+    grid, base_width = 16, base_height = 13, bg = "white")
   grid
 }
 
