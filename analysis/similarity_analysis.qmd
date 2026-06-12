@@ -31,10 +31,14 @@ saliency_values <- read.csv(here("data/metadata/level-imagepair_added-saliency_d
 usable_trials_summarized_with_sims <- usable_trials_summarized_with_sims |> 
   left_join(aoa_ratings |> transmute(text1=Word, aoa=AoA_Kup_lem)) |>
   left_join(saliency_values, by=c("unique_pair"="ImagePair")) |>
-  mutate(age_bucket = cut(age, 
-                          breaks = c(12, 18, 24, 36, 48, 60), 
-                          labels = c("(12-18]", "(18-24]", "(24-36]", "(36-48]", "(48-60]"),
-                          include.lowest = TRUE))
+  mutate(age_bucket_bigger = cut(age, 
+                          breaks = c(12, 18, 24, 30, 36, 48, 60), 
+                          labels = c("(12-18]", "(18-24]", "(24-30]", "(30-36]", "(36-48]", "(48-60]"),
+                          include.lowest = TRUE),
+         age_bucket = cut(age,
+                                 breaks = c(12, 24, 36, 48, 60),
+                                  labels = c("(12-24]", "(24-36]", "(36-48]", "(48-60]"),
+                                 include.lowest = TRUE))
 
 # rounding each participant to the closest 5
 age_based_trials <- usable_trials_summarized_with_sims |> mutate(
@@ -52,6 +56,7 @@ clip_data_summarized_age_bucket <- summarize_similarity_data_collapsed(usable_tr
 vanilla <- clip_data_summarized |> filter(vanilla_trial == 1)
 
 sims <- c("image_similarity","text_similarity","multimodal_similarity","ooo_similarity")
+sims_scaled <- c("scaled_image_similarity", "scaled_text_similarity", "scaled_multimodal_similarity", "scaled_ooo_similarity")
 facet_labs <- c(text_similarity       = "Text similarity",
                 image_similarity      = "Image similarity",
                 multimodal_similarity = "Multimodal similarity",
@@ -109,6 +114,10 @@ generate_multimodal_plots(vanilla, "CLIP", title = "all vanilla trials", size_by
 generate_multimodal_plots(vanilla, "CLIP", title = "by dataset",   group_var = "dataset_name", se_alpha=0.2, point_alpha=0.1, show_legend = TRUE, line_alpha=0.4, show_cor=FALSE, overall_line=TRUE, overall_alpha=0.7, base_size=16)
 generate_multimodal_plots(clip_data_summarized, "CLIP", title = "different trial types", group_var = "vanilla_trial", point_alpha=0.1, show_se=TRUE, base_size=16)
 generate_multimodal_plots(clip_data_summarized_age_bucket |> filter(vanilla_trial == 1 & !is.na(age_bucket) & N>=5), "CLIP", title = "different age buckets (N>=5)", group_var = "age_bucket",  show_se = TRUE, se_alpha = 0.2, point_alpha=0.1, line_alpha = 0.8, line_width=1.1, base_size=16)
+
+clip_data_summarized_age_bucket_bigger <- summarize_similarity_data_collapsed(usable_trials_summarized_with_sims, extra_fields = c("dataset_name", "vanilla_trial", "aoa", "MeanSaliencyDiff", "age_bucket_bigger")) |> mutate(
+   sim_logit = qlogis(pmin(pmax(image_similarity, 1e-6), 1 - 1e-6)))
+   generate_multimodal_plots(clip_data_summarized_age_bucket_bigger |> filter(vanilla_trial == 1 & !is.na(age_bucket_bigger) & N>=5), "CLIP", title = "different larger age buckets (N>=5)", group_var = "age_bucket_bigger",  show_se = TRUE, se_alpha = 0.2, point_alpha=0.1, line_alpha = 0.8, line_width=1.1, base_size=16)
 ```
 
 ## By age
@@ -736,7 +745,7 @@ lapply(mods_baseline_looking, function(m) summary(m))
 ## Under 3 years old
 LWL specific ages and AoA?
 ```{r}
-mods_younger <-  lapply(sims, fit_main, data=model_data |> filter(age <= 24)); names(mods_younger) <- sims
+mods_younger <-  lapply(sims, fit_main, data=model_data |> filter(age <= 36)); names(mods_younger) <- sims
 lapply(mods_younger, function(m) m@optinfo$conv$lme4$messages)
 lapply(mods_younger, function(m) summary(m))
 ```
@@ -748,7 +757,8 @@ Adult behavioral similarity is significant here..AoA effects only appear between
 # Conference plots
 todo: make sure models used are not singular
 
-## unscaled
+## predict main line -- with datasets
+### unscaled
 ```{r}
 plot_data <- vanilla |>
   pivot_longer(all_of(sims), names_to = "sim_type", values_to = "similarity") |>
@@ -816,6 +826,7 @@ ggsave(here("figures", "dataset_similarities.png"),
 fig
 ```
 
+### scaled
 ```{r}
 library(ggeffects)
 library(purrr)
@@ -841,10 +852,8 @@ pred_scaled <- map_dfr(sims, function(s) {
   mutate(sim_type = factor(sim_type, levels = sims))
 ```
 
-## scaled?
+## scaled with dataset?
 ```{r}
-# Note: replace "scaled_similarity" with whatever name your pre-scaled x-variable 
-# column has in your main 'plot_data' data frame.
 clip_data_summarized_scaled <- summarize_similarity_data_collapsed_scaled(model_data_scaled, extra_fields = c("dataset_name"))
 clip_data_summarized_scaled_bucket <- summarize_similarity_data_collapsed_scaled(model_data_scaled, extra_fields = c("dataset_name", "age_bucket"))
 
@@ -870,7 +879,7 @@ fig <- ggplot(plot_data_scaled, aes(similarity, mean_value,
   geom_ribbon(data = pred_scaled, inherit.aes = FALSE,
               aes(x = similarity, ymin = lower, ymax = upper),
               fill = "black", alpha = 0.15) +
-  geom_line(data = pred, inherit.aes = FALSE,
+  geom_line(data = pred_scaled, inherit.aes = FALSE,
             aes(x = similarity, y = y),
             colour = "black", alpha = 0.7, linewidth = 1.2) +
   
@@ -888,6 +897,7 @@ fig <- ggplot(plot_data_scaled, aes(similarity, mean_value,
         strip.text = element_text(size = 20),
         panel.spacing = unit(1, "lines"),
         plot.margin = margin(t = 5.5, r = 30, b = 5.5, l = 5.5, unit = "pt"))
+
 ggsave(here("figures", "dataset_similarities_zscored.png"),
        fig, width = 16, height = 13, bg = "white")
 ggsave(here("figures", "dataset_similarities_zscored.svg"),
@@ -908,7 +918,7 @@ mods_age <- expand_grid(
 ) |>
   mutate(
     model = map2(sim, age_bucket, ~
-      fit_main(
+      fit_main_scaled(
         sim = .x,
         data = model_data_age |> filter(age_bucket == .y)
       )
