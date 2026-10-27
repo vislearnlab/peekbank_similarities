@@ -25,12 +25,65 @@ library(ggeffects)
 
 # Import data 
 ```{r}
+clean_dataset_names <- tribble(
+  ~dataset_name, ~`Dataset Name`,
+  "reflook_v4", "Yurovsky et al. (2017)", 
+  "yurovsky_2017", "Yurovsky & Frank (2017)", 
+  "weaver_zettersten_2024", "Weaver et al. (2024)",
+  "fernald_marchman_2012", "Fernald & Marchman (2012)",
+  "frank_tablet_2016", "Frank et al. (2016)", 
+  "fmw_2013", "Fernald et al. (2013)", 
+  "adams_marchman_2018", "Adams et al. (2018)" ,
+  "potter_canine", "Potter & Lew Williams (2024)",
+  "potter_remix", "Potter et al. (2019)",
+  "fernald_totlot", "Fernald et al. (2006)",
+"pomper_prime", "Pomper & Saffran (2015)",
+"pomper_saffran_2016", "Pomper & Saffran (2016)", 
+"swingley_aslin_2002", "Swingley & Aslin (2002)",
+"pomper_salientme", "Pomper & Saffran (2019)", 
+"perry_cowpig", "Perry & Saffan (2017)", 
+"ronfard_2021", "Ronfard et al. (2022)",
+"bacon_gendercues", "Bacon & Saffran (2022)",
+"garrison_bergelson_2020", "Garrison et al. (2020)",
+"pomper_yumme", "Pomper & Saffran (2018)", 
+"mahr_coartic", "Mahr et al. (2015)",
+"reflook_socword", "Yurovsky et al. (2013)",
+"yoon_simpimp_2015","Yoon et al. (2015)",
+"borovsky_2019", "Borovsky & Peters (2019)",
+"pomper_dimy", "Pomper & Saffran (2017)",
+"weaver_saffran_2026", "Weaver & Saffran (2026)",
+"bergelson_swingley_2012", "Bergelson & Swingley (2012)",
+"moore_bergelson_2022_verb", "Moore & Bergelson (2022)",
+"byers-heinlein_2017", "Byers-Heinlein et al. (2017)",
+"casillas_tseltal_2015", "Casillas et al. (2017)",
+"kremin_2021", "Kremin et al. (2023)",
+"kartushina_2019", "Kartushina & Mayor (2019)",
+"sander-montant_2022", "Sander-Montant et al. (2023)"
+)
+
 usable_trials_summarized_with_sims <- read.csv(here("data/usable_trials_with_similarities.csv"))
 aoa_ratings <- read.csv(here("data/metadata/level-aoaratings_type-kuperman_data.csv"))
-saliency_values <- read.csv(here("data/metadata/level-imagepair_added-saliency_data.csv"))
+# per-trial saliency: MeanSaliencyDiff is target minus distractor for the composite matching the trial's target side
+saliency_values <- read.csv(here("data/metadata/level-trial_added-saliency_data.csv")) |>
+  select(trial_key, target_side, MeanSaliencyDiff)
+target_sides <- readRDS(here("intermediates/trial_types.Rds")) |>
+  distinct(trial_type_id, target_side)
+replacements <- data.frame(
+  from = c("kitty", "birdy", "doggy", "bicycle", "sofa", "keys", "teddy",
+           "shoes", "froggy", "bunny", "kittycat", "ducky",
+           "paci", "wubby", "fishy", "blocks", "diapey", "horsie", "dolly", "cowie"),
+  to   = c("cat", "bird", "dog", "bike", "couch", "key",
+           "shoe", "frog", "rabbit", "cat", "teddy bear", "duck",
+           "pacifier", "pacifier", "fish", "block", "diaper", "horse", "doll", "cow"),
+  stringsAsFactors = FALSE
+)
+# other options: teddy bear to bear, sippycup to cup, sippy to bottle, waterbottle to bottle
 usable_trials_summarized_with_sims <- usable_trials_summarized_with_sims |> 
-  left_join(aoa_ratings |> transmute(text1=Word, aoa=AoA_Kup_lem)) |>
-  left_join(saliency_values, by=c("unique_pair"="ImagePair")) |>
+  left_join(replacements, by=c("text1"="from")) |>
+  mutate(aoa_word = coalesce(to, text1)) |>
+  left_join(aoa_ratings |> transmute(aoa_word=Word, aoa=AoA_Kup_lem)) |>
+  left_join(target_sides, by = "trial_type_id") |>
+  left_join(saliency_values, by = c("trial_key", "target_side")) |>
   mutate(age_bucket_bigger = cut(age, 
                           breaks = c(12, 18, 24, 30, 36, 48, 60), 
                           labels = c("(12-18]", "(18-24]", "(24-30]", "(30-36]", "(36-48]", "(48-60]"),
@@ -38,8 +91,7 @@ usable_trials_summarized_with_sims <- usable_trials_summarized_with_sims |>
          age_bucket = cut(age,
                                  breaks = c(12, 24, 36, 48, 60),
                                   labels = c("(12-24]", "(24-36]", "(36-48]", "(48-60]"),
-                                 include.lowest = TRUE))
-
+                                 include.lowest = TRUE)) 
 # rounding each participant to the closest 5
 age_based_trials <- usable_trials_summarized_with_sims |> mutate(
   rounded_age = round_to_nearest(age, round_to=5)
@@ -61,6 +113,8 @@ facet_labs <- c(text_similarity       = "Text similarity",
                 image_similarity      = "Image similarity",
                 multimodal_similarity = "Multimodal similarity",
                 ooo_similarity        = "Adult behavioral similarity")
+
+model_data <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 1)
 
 downloaded_aois <- readRDS(here("intermediates/downloaded_aois.Rds"))
 ```
@@ -366,7 +420,8 @@ sims_long <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 1) |>
   mutate(sim_type = sub("_similarity$", "", sim_type))
 
 aoi_base <- downloaded_aois |>
-  filter(!is.na(accuracy), trial_type_id %in% sims_long$trial_type_id)
+  filter(!is.na(accuracy), trial_id %in% model_data$trial_id) |>
+  left_join(model_data |> distinct(administration_id, subject_id), by = "administration_id")
 
 # fan out: each timepoint contributes to its high/low bucket in each dimension
 aoi_split <- aoi_base |>
@@ -374,7 +429,7 @@ aoi_split <- aoi_base |>
 
 # subject means per condition x time, then across-subject mean + 95% CI
 across_split <- aoi_split |>
-  group_by(sim_type, sim_split, administration_id, t_norm) |>
+  group_by(sim_type, sim_split, subject_id, t_norm) |>
   summarise(mean_accuracy = mean(accuracy, na.rm = TRUE), .groups = "drop") |>
   group_by(sim_type, sim_split, t_norm) |>
   summarise(accuracy = mean(mean_accuracy, na.rm = TRUE),
@@ -382,12 +437,17 @@ across_split <- aoi_split |>
             .groups = "drop") |>
   mutate(condition = paste(sim_type, sim_split))
 
-summarize_across_subj_aois <- readRDS(here("intermediates/summarize_across_subj_aois.Rds"))
-# the existing overall line as the 9th condition
+# overall line from the same vanilla trials as the split lines
+across_overall <- aoi_base |>
+  group_by(subject_id, t_norm) |>
+  summarise(mean_accuracy = mean(accuracy, na.rm = TRUE), .groups = "drop") |>
+  group_by(t_norm) |>
+  summarise(accuracy = mean(mean_accuracy, na.rm = TRUE),
+            ci = crit * sd(mean_accuracy, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
 plot_df <- bind_rows(
   across_split |> select(t_norm, accuracy, ci, condition),
-  summarize_across_subj_aois |> mutate(condition = "Overall") |>
-    select(t_norm, accuracy, ci, condition)
+  across_overall |> mutate(condition = "Overall")
 ) |>
   mutate(condition = forcats::fct_relevel(condition, "Overall"))
 
@@ -415,7 +475,6 @@ library(lmerTest)
 library(glmmTMB)
 library(MuMIn)
 library(broom.mixed)
-model_data <- usable_trials_summarized_with_sims |> filter(vanilla_trial == 1)
 model_data_scaled <- model_data |> 
   mutate(
     # Scale your response variable but keep the original for plotting later
@@ -585,7 +644,7 @@ fit_common <- function(sim, data=dat_cc) {
       "(1 | original_target_label:img_key)",
       "(1 | dataset_id)"),
     response = "scale(mean_target_looking_critical_window)")
-  lmer(f, data = dat_cc, REML = FALSE)
+  lmer(f, data = data, REML = FALSE)
 }
 
 mods_common <- lapply(sims, fit_common); names(mods_common) <- sims
@@ -596,7 +655,7 @@ sel
 
 summary(mods_common$image_similarity)
 ```
-Image similarity model comes out on top.
+Image similarity model is the best but behavioral similarity model is pretty close to second.
 
 ## including non-vanilla trials
 ```{r}
@@ -607,11 +666,12 @@ lapply(mods_all, function(m) m@optinfo$conv$lme4$messages)
 lapply(mods_all, function(m) summary(m))
 ```
 
-multimodal similarity and image similarity ar  the only significant ones here...pruning
+multimodal similarity and image similarity are the only significant ones here...pruning
 ```{r}
 pruned_multimodal_model_all <- lmer(scale(mean_target_looking_critical_window) ~ scale(multimodal_similarity)*scale(age)
                     + scale(aoa) + scale(MeanSaliencyDiff)
                     + (1 | subject_id)
+                    + (1 | original_target_label:img_key)
                     + (1|dataset_id), data = usable_trials_summarized_with_sims)
 summary(pruned_multimodal_model_all)
 ```
@@ -628,9 +688,17 @@ lapply(mods_baseline_covariate, function(m) summary(m))
 ## predicting baseline corrected looking
 ```{r}
 mods_baseline_corrected <-  lapply(sims, fit_main, data=baseline_data, response="corrected_target_looking"); names(mods_baseline_corrected) <- sims
-lapply(mods_baseline_corrected, function(m) m@optinfo$conv$lme4$messages)
 lapply(mods_baseline_corrected, function(m) summary(m))
 ```
+
+text and adult behavioral models are singular (by-subject similarity slope SD ~ .01, corr = -1), pruning the slope
+```{r}
+mods_baseline_corrected_pruned <- lapply(c("text_similarity", "ooo_similarity"), fit_main, data=baseline_data, response="corrected_target_looking", pruned_model=TRUE)
+names(mods_baseline_corrected_pruned) <- c("text_similarity", "ooo_similarity")
+lapply(mods_baseline_corrected_pruned, function(m) m@optinfo$conv$lme4$messages)
+lapply(mods_baseline_corrected_pruned, function(m) summary(m))
+```
+
 ## predicting window type
 ```{r}
 baseline_data_window_type <- baseline_data |> pivot_longer(cols=c(mean_target_looking_critical_window, mean_target_looking_baseline_window), names_to="window_type", values_to="target_looking") |>
@@ -735,11 +803,27 @@ baseline_interaction_plot <- ggplot(
 ggsave(here("figures/baseline_interaction.png"), baseline_interaction_plot)
 ```
 
+
 ## baseline window looking?
 ```{r}
 mods_baseline_looking <-  lapply(sims, fit_main, data=baseline_data, response="mean_target_looking_baseline_window"); names(mods_baseline_looking) <- sims
 lapply(mods_baseline_looking, function(m) m@optinfo$conv$lme4$messages)
 lapply(mods_baseline_looking, function(m) summary(m))
+```
+
+all four are singular, and still singular with the pruned structure: subject and dataset intercept variances are 0 before word onset, so only the item intercept is kept
+```{r}
+fit_baseline_looking_pruned <- function(sim, data = baseline_data) {
+  f <- reformulate(
+    c(sprintf("scale(%s)*scale(age)", sim),
+      "scale(aoa)", "scale(MeanSaliencyDiff)",
+      "(1 | original_target_label:img_key)"),
+    response = "scale(mean_target_looking_baseline_window)")
+  lmer(f, data = data)
+}
+mods_baseline_looking_pruned <- lapply(sims, fit_baseline_looking_pruned); names(mods_baseline_looking_pruned) <- sims
+lapply(mods_baseline_looking_pruned, function(m) m@optinfo$conv$lme4$messages)
+lapply(mods_baseline_looking_pruned, function(m) summary(m))
 ```
 
 ## Under 3 years old
@@ -754,7 +838,7 @@ this makes me think of the cascading age prediction..younger kids: image similar
 Adult behavioral similarity is significant here..AoA effects only appear between 24 and 36 months.
 
 
-# Conference plots
+# Conference abstract plots
 todo: make sure models used are not singular
 
 ## predict main line -- with datasets
@@ -866,14 +950,14 @@ plot_data_scaled <- clip_data_summarized_scaled |>
   ) |>
   mutate(
     sim_type = factor(sim_type, levels = sims)
-  )
+  ) |> left_join(clean_dataset_names)
 
 
 fig <- ggplot(plot_data_scaled, aes(similarity, mean_value, 
-                             colour = dataset_name, fill = dataset_name)) +
+                             colour = `Dataset Name`, fill = `Dataset Name`)) +
   geom_hline(yintercept = 0.5, linetype = "dashed") +
-  geom_point(size = 3, alpha = 0.1) +
-  stat_smooth(method = "glm", geom = "line", alpha = 0.5, linewidth = 1) +
+  geom_point(aes(size = N), alpha = 0.15) +
+  stat_smooth(method = "glm", geom = "line", alpha = 0.7, linewidth = 1.3) +
   
   # lmer population line + CI
   geom_ribbon(data = pred_scaled, inherit.aes = FALSE,
@@ -881,29 +965,57 @@ fig <- ggplot(plot_data_scaled, aes(similarity, mean_value,
               fill = "black", alpha = 0.15) +
   geom_line(data = pred_scaled, inherit.aes = FALSE,
             aes(x = similarity, y = y),
-            colour = "black", alpha = 0.7, linewidth = 1.2) +
+            colour = "black", alpha = 0.8, linewidth = 1.5) +
   
   facet_wrap(~ sim_type, nrow = 2, scales = "free_x",                        
              labeller = labeller(sim_type = facet_labs),
              strip.position = "top") +         
-  scale_y_continuous(breaks = seq(0, 1, 0.2)) +
-  coord_cartesian(ylim = c(0, 1)) +
+  scale_y_continuous(breaks = seq(0.2, 1, 0.2)) +
+  coord_cartesian(ylim = c(0.2, 1)) +
+  scale_size_continuous(
+  name = "Number of participants in trial",
+  range = c(2, 12)
+) +
   scale_color_discrete_qualitative(palette="Set 2") +
   labs(x = "Target–distractor similarity (z-scored)", 
        y = "Proportion target looking in critical window",
        colour = "Dataset Name", fill = "Dataset Name") +
-  theme_classic(base_size=16) +
-  theme(legend.position = "bottom",
-        strip.text = element_text(size = 20),
-        panel.spacing = unit(1, "lines"),
-        plot.margin = margin(t = 5.5, r = 30, b = 5.5, l = 5.5, unit = "pt"))
+   guides(
+    colour = guide_legend(nrow = 24, override.aes = list(linewidth=2)),
+    fill = guide_legend(nrow = 24, override.aes = list(linewidth=2))
+  )+
+  theme_classic(base_size=26) +
+  theme(
+    # Axis titles
+    axis.title.x = element_text(size = 28),
+    axis.title.y = element_text(size = 28),
+
+    # Axis tick labels
+    axis.text.x = element_text(size = 26),
+    axis.text.y = element_text(size = 26),
+
+    # Legend title and labels
+    legend.title = element_text(size = 25),
+    legend.text = element_text(size = 25),
+
+    # Legend key size
+    legend.key.size = unit(1.2, "cm"),
+
+    # Facet strip labels
+    strip.text = element_text(size = 30),
+
+    # Existing settings
+    legend.position = "right",
+    panel.spacing = unit(1, "lines"),
+    plot.margin = margin(t = 5.5, r = 30, b = 5.5, l = 5.5, unit = "pt")
+  )
+
 
 ggsave(here("figures", "dataset_similarities_zscored.png"),
        fig, width = 16, height = 13, bg = "white")
 ggsave(here("figures", "dataset_similarities_zscored.svg"),
        fig, width = 16, height = 13, device="pdf")
 ```
-
 
 ## age
 todo: ensure models used are not singular.
@@ -1026,4 +1138,396 @@ age_scaled_plot <- ggplot(
 
 ggsave(here("figures", "age_similarities_zscored.png"),
        age_scaled_plot, width = 15, height = 13, bg = "white")
+```
+
+# BUCLD poster plots
+
+## timecourse across age
+```{r}
+crit <- qnorm(0.975)
+
+bin_width  <- 3                                   # finer bins = more lines, like the AoA plot
+age_breaks <- seq(12, 60, by = bin_width)
+age_mids   <- head(age_breaks, -1) + bin_width / 2
+
+baseline_win <- c(-2000, 0)
+critical_win <- c(300, 3500)
+x_lims       <- c(-2250, 3750)
+
+aoi_age_binned <- downloaded_aois |>
+  filter(!is.na(accuracy),
+         trial_id %in% model_data$trial_id,
+         between(t_norm, x_lims[1], x_lims[2])) |>
+  select(-any_of(c("age", "subject_id"))) |>
+  left_join(usable_trials_summarized_with_sims |> distinct(administration_id, subject_id, age),
+            by = "administration_id") |>
+  mutate(age_mid = as.numeric(as.character(
+    cut(age, breaks = age_breaks, labels = age_mids, include.lowest = TRUE)))) |>
+  filter(!is.na(age_mid))
+
+# subject means (children with multiple administrations count once per age bin)
+subj_time_age <- aoi_age_binned |>
+  group_by(age_mid, subject_id, t_norm) |>
+  summarise(subj_acc = mean(accuracy, na.rm = TRUE), .groups = "drop")
+
+timecourse_age <- subj_time_age |>
+  group_by(age_mid, t_norm) |>
+  summarise(accuracy = mean(subj_acc, na.rm = TRUE), .groups = "drop")
+
+# overall line: each child counts once
+timecourse_overall <- aoi_age_binned |>
+  group_by(subject_id, t_norm) |>
+  summarise(subj_acc = mean(accuracy, na.rm = TRUE), .groups = "drop") |>
+  group_by(t_norm) |>
+  summarise(accuracy = mean(subj_acc, na.rm = TRUE),
+            ci       = crit * sd(subj_acc, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+# age effect from the pre-registered image similarity model (age at mean image similarity)
+age_coef <- coef(summary(mods$image_similarity))["scale(age)", ]
+
+p_lab  <- if (age_coef[["Pr(>|t|)"]] < .001) "p<.001" else
+  paste0("p=", sub("^0", "", sprintf("%.3f", age_coef[["Pr(>|t|)"]])))
+r_lab  <- sprintf("Age effect: β=%.2f, t(%d)=%.2f, %s",
+                  age_coef[["Estimate"]], round(age_coef[["df"]]),
+                  age_coef[["t value"]], p_lab)
+
+arrow_y <- 0.9
+label_y <- 0.98
+
+timecourse_age_plot <- ggplot() +
+  # shaded windows
+  annotate("rect", xmin = baseline_win[1], xmax = baseline_win[2],
+           ymin = 0, ymax = 1, fill = "grey97") +
+  annotate("rect", xmin = critical_win[1], xmax = critical_win[2],
+           ymin = 0, ymax = 1, fill = "grey97") +
+  # window arrows + labels
+  annotate("segment", x = baseline_win[1], xend = baseline_win[2],
+           y = arrow_y, yend = arrow_y, linewidth = 1,
+           arrow = arrow(ends = "both", type = "closed", length = unit(0.12, "inches"))) +
+  annotate("segment", x = critical_win[1], xend = critical_win[2],
+           y = arrow_y, yend = arrow_y, linewidth = 1,
+           arrow = arrow(ends = "both", type = "closed", length = unit(0.12, "inches"))) +
+  annotate("text", x = mean(baseline_win), y = label_y, label = "Baseline window",
+           fontface = "bold", size = 6.5) +
+  annotate("text", x = mean(critical_win), y = label_y, label = "Critical window",
+           fontface = "bold", size = 6.5) +
+  # reference lines
+  geom_hline(yintercept = 0.5, linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = 0, linewidth = 1.5) +
+  geom_vline(xintercept = 300, linetype = "dotted", linewidth = 1.5) +
+  # age-bin lines (raw, faint)
+  geom_line(data = timecourse_age,
+            aes(t_norm, accuracy, group = age_mid, colour = age_mid),
+            alpha = 0.3, linewidth = 0.8) +
+  # overall mean + 95% CI
+  geom_ribbon(data = timecourse_overall,
+              aes(t_norm, ymin = accuracy - ci, ymax = accuracy + ci),
+              fill = "grey40", alpha = 0.3) +
+  geom_line(data = timecourse_overall, aes(t_norm, accuracy),
+            colour = "black", linewidth = 1.5) +
+  # stats annotation
+  annotate("text", x = mean(critical_win), y = 0.1, label = r_lab,
+           size = 7) +
+    scale_colour_viridis_c(option = "mako", direction = -1, begin = 0.15, end = 0.85,
+                         limits = c(12, 60), breaks = seq(12, 60, 12),
+                         name = "Age\n(months)") +
+  guides(colour = guide_colourbar(barheight = unit(10, "lines"),
+                                  barwidth  = unit(1.5, "lines"))) +
+   scale_y_continuous(breaks = seq(0, 1, 0.25),
+                     labels = c("0.00", "0.25", "0.50", "0.75", "1.00")) +
+  scale_x_continuous(breaks = seq(-2000, 3500, 500)) +
+  coord_cartesian(xlim = x_lims, ylim = c(0, 1.02), expand = FALSE) +
+  labs(x = "Time (normalized to target word onset) in ms",
+       y = "Proportion\nTarget Looking") +
+  theme_classic(base_size = 20) +
+  theme(axis.title   = element_text(face = "bold"),
+        axis.text    = element_text(face = "bold", size = 17),
+        axis.line    = element_line(linewidth = 1),
+        legend.title = element_text(face = "bold"),
+        legend.text  = element_text(face = "bold"),
+        legend.position = "right",
+        plot.margin = margin(10, 10, 10, 10))
+
+ggsave(here("figures", "timecourse_age.png"),
+       timecourse_age_plot, width = 13, height = 5, bg = "white")
+ggsave(here("figures", "timecourse_age.svg"),
+       timecourse_age_plot, width = 13, height = 5, device="pdf")
+timecourse_age_plot
+```
+
+# Main pre-registered plots
+```{r}
+fig_poster <- ggplot(plot_data_scaled, aes(similarity, mean_value, 
+                             colour = `Dataset Name`, fill = `Dataset Name`)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(aes(size = N), alpha = 0.15) +
+  stat_smooth(method = "glm", geom = "line", alpha = 0.7, linewidth = 1.3) +
+  
+  # lmer population line + CI
+  geom_ribbon(data = pred_scaled, inherit.aes = FALSE,
+              aes(x = similarity, ymin = lower, ymax = upper),
+              fill = "black", alpha = 0.15) +
+  geom_line(data = pred_scaled, inherit.aes = FALSE,
+            aes(x = similarity, y = y),
+            colour = "black", alpha = 0.8, linewidth = 1.5) +
+  
+  facet_wrap(~ sim_type, nrow = 2, scales = "free_x",                        
+             labeller = labeller(sim_type = facet_labs),
+             strip.position = "top") +         
+  scale_y_continuous(breaks = seq(0.2, 1, 0.2)) +
+  coord_cartesian(ylim = c(0.2, 1)) +
+  scale_size_continuous(
+  name = "Number of participants in trial",
+  range = c(2, 12)
+) +
+  scale_color_discrete_qualitative(palette="Set 2") +
+  labs(x = "Target–distractor similarity (z-scored)", 
+       y = "Proportion target looking in critical window",
+       colour = "Dataset Name", fill = "Dataset Name") +
+   guides(
+    colour = "none",
+    fill = "none"
+  )+
+  theme_classic(base_size=26) +
+  theme(
+    # Axis titles
+    axis.title.x = element_text(size = 28),
+    axis.title.y = element_text(size = 28),
+
+    # Axis tick labels
+    axis.text.x = element_text(size = 26),
+    axis.text.y = element_text(size = 26),
+
+    # Legend title and labels
+    legend.title = element_text(size = 25),
+    legend.text = element_text(size = 25),
+
+    # Legend key size
+    legend.key.size = unit(1.2, "cm"),
+
+    # Facet strip labels
+    strip.text = element_text(size = 30),
+
+    # Existing settings
+    legend.position = "bottom",
+    panel.spacing = unit(1, "lines"),
+    plot.margin = margin(t = 5.5, r = 30, b = 5.5, l = 5.5, unit = "pt")
+  )
+
+ggsave(here("figures", "dataset_similarities_zscored_poster.png"),
+       fig_poster, width = 16, height = 16, bg = "white")
+ggsave(here("figures", "dataset_similarities_zscored_poster.svg"),
+       fig_poster, width = 16, height = 16, device="pdf")
+```
+## age poster plot
+```{r}
+library(purrr)
+
+vars5       <- c(sims, "saliency_diff")
+facet_labs5 <- c(facet_labs, saliency_diff = "Saliency difference")
+
+# saliency gets its own saliency x age model, same structure as the similarity models
+mods_pred <- c(mods_scaled, list(saliency_diff = fit_main_scaled("saliency_diff")))
+# text similarity's by-subject slope is singular (SD ~ .02, corr = -1); use the pruned fit
+mods_pred$text_similarity <- fit_main_scaled("text_similarity", pruned_model = TRUE)
+
+# constants for converting age to/from z and un-scaling the response
+age_mu <- mean(model_data_scaled$age, na.rm = TRUE)
+age_sd <- sd(model_data_scaled$age, na.rm = TRUE)
+y_mean <- mean(model_data_scaled$mean_target_looking_critical_window, na.rm = TRUE)
+y_sd   <- sd(model_data_scaled$mean_target_looking_critical_window, na.rm = TRUE)
+
+age_vals <- seq(12, 60, by = 6)
+age_z    <- round((age_vals - age_mu) / age_sd, 4)
+
+pred_age <- map_dfr(vars5, function(v) {
+  ggpredict(mods_pred[[v]],
+            terms = c(paste0("scaled_", v),
+                      sprintf("scaled_age [%s]", paste(age_z, collapse = ",")))) |>
+    as.data.frame() |>
+    transmute(
+      sim_type   = v,
+      similarity = x,                                              # stays z-scored
+      age        = round(as.numeric(as.character(group)) * age_sd + age_mu),
+      y          = predicted * y_sd + y_mean,
+      lower      = conf.low  * y_sd + y_mean,
+      upper      = conf.high * y_sd + y_mean
+    )
+}) |>
+  mutate(sim_type = factor(sim_type, levels = vars5))
+
+# observed trial-type x age-bucket means on the same z-scored x axis
+bucket_mid <- c("(12-24]" = 18, "(24-36]" = 30, "(36-48]" = 42, "(48-60]" = 54)
+points_age <- model_data_scaled |>
+  filter(!is.na(age_bucket)) |>
+  group_by(trial_type_id, age_bucket) |>
+  summarise(mean_value = mean(mean_target_looking_critical_window, na.rm = TRUE),
+            N = n_distinct(subject_id),
+            across(all_of(paste0("scaled_", vars5)), ~ mean(.x, na.rm = TRUE)),
+            .groups = "drop") |>
+  filter(N >= 5) |>
+  pivot_longer(all_of(paste0("scaled_", vars5)),
+               names_to = "sim_type", names_prefix = "scaled_",
+               values_to = "similarity") |>
+  mutate(age = unname(bucket_mid[as.character(age_bucket)]),
+         sim_type = factor(sim_type, levels = vars5))
+
+facet_labs5_wrapped <- setNames(stringr::str_wrap(facet_labs5, width = 14), names(facet_labs5))
+
+age_pred_plot <- ggplot(pred_age, aes(similarity, y, group = age, colour = age, fill = age)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", linewidth = 0.9) +
+  geom_point(data = points_age, aes(similarity, mean_value, colour = age),
+             inherit.aes = FALSE, alpha = 0.08, size = 2.5) +
+  geom_ribbon(data = pred_age |> filter(age %in% range(age_vals)),
+              aes(ymin = lower, ymax = upper), colour = NA, alpha = 0.12) +
+  geom_line(linewidth = 1.6) +
+  facet_wrap(~ sim_type, nrow = 1, ncol = 5, scales = "free_x",
+             labeller = labeller(sim_type = facet_labs5_wrapped)) +
+  scale_colour_viridis_c(option = "mako", direction = -1, begin = 0.15, end = 0.85,
+                         limits = c(12, 60), breaks = seq(12, 60, 12),
+                         name = "Age (months)", aesthetics = c("colour", "fill")) +
+  guides(colour = guide_colourbar(barwidth = unit(20, "lines"),
+                                  barheight = unit(1.4, "lines"),
+                                  title.vjust = 0.8)) +
+  scale_y_continuous(breaks = seq(0.2, 1, 0.2)) +
+  coord_cartesian(ylim = c(0.2, 1)) +
+  labs(x = "Target–distractor similarity (z-scored)",
+       y = "Predicted proportion target\nlooking (critical window)") +
+  theme_classic(base_size = 22) +
+  theme(legend.position = "bottom",
+        axis.title   = element_text(size = 26),
+        axis.text    = element_text(size = 20, colour = "black"),
+        axis.line    = element_line(linewidth = 0.9),
+        axis.ticks   = element_line(linewidth = 0.9),
+        strip.text   = element_text(size = 30, margin = margin(t = 6, b = 6)),
+        legend.title = element_text(size = 24),
+        legend.text  = element_text(size = 22),
+        panel.spacing = unit(1.5, "lines"),
+        plot.margin = margin(t = 5.5, r = 20, b = 5.5, l = 5.5, unit = "pt"))
+
+ggsave(here("figures", "age_similarities_predicted_zscored.png"),
+       age_pred_plot, width = 20.263, height = 6.286, dpi = 300, bg = "white")
+ggsave(here("figures", "age_similarities_predicted_zscored.svg"),
+       age_pred_plot, width = 20.263, height = 6.286, device="pdf")
+age_pred_plot
+```
+
+## baseline interaction poster plot
+```{r}
+library(purrr)
+
+robust <- TRUE   # TRUE = random slopes for window + trial pairing; FALSE = pruned structure
+
+vars5       <- c(sims, "saliency_diff")
+facet_labs5 <- c(facet_labs, saliency_diff = "Saliency difference")
+
+# stack windows, using predictors z-scored on the full vanilla data (same scale as the age plot)
+baseline_window_scaled <- model_data_scaled |>
+  filter(min_time <= -500) |>
+  mutate(trial_row = row_number()) |>                 # tag each trial before pivoting
+  pivot_longer(c(mean_target_looking_critical_window, mean_target_looking_baseline_window),
+               names_to = "window_type", values_to = "target_looking") |>
+  mutate(trial_window_c  = ifelse(grepl("critical", window_type), 0.5, -0.5),
+         scaled_looking  = as.vector(scale(target_looking)))
+
+yb_mean <- mean(baseline_window_scaled$target_looking, na.rm = TRUE)
+yb_sd   <- sd(baseline_window_scaled$target_looking, na.rm = TRUE)
+
+# FULLY INTERACTED: every fixed effect gets its own slope in each window,
+# so AoA / age / saliency can't leak into the window-specific similarity slopes
+fit_window_scaled <- function(v, data = baseline_window_scaled, robust = TRUE) {
+  x <- paste0("scaled_", v)
+  fixed <- sprintf("trial_window_c * (%s * scaled_age + scaled_aoa + scaled_saliency_diff)", x)
+  re <- if (robust) {
+    c("(1 + trial_window_c | subject_id)",
+      "(1 + trial_window_c | original_target_label:img_key)",
+      "(1 | dataset_id)",
+      "(1 | trial_row)")
+  } else {
+    c("(1 | subject_id)", "(1 | original_target_label:img_key)", "(1 | dataset_id)")
+  }
+  lmer(reformulate(c(fixed, re), response = "scaled_looking"), data = data)
+}
+
+mods_window <- lapply(vars5, fit_window_scaled, robust = robust); names(mods_window) <- vars5
+lapply(mods_window, function(m) m@optinfo$conv$lme4$messages)
+
+# the one coefficient that matters: does the predictor's slope differ between windows?
+lapply(vars5, function(v) {
+  cs <- coef(summary(mods_window[[v]]))
+  cs[grep(sprintf("^trial_window_c:scaled_%s$|^scaled_%s:trial_window_c$", v, v),
+          rownames(cs)), , drop = FALSE]
+}) |> setNames(vars5)
+
+pred_window <- map_dfr(vars5, function(v) {
+  ggpredict(mods_window[[v]],
+            terms = c(paste0("scaled_", v), "trial_window_c [-0.5, 0.5]")) |>
+    as.data.frame() |>
+    transmute(sim_type   = v,
+              similarity = x,
+              window     = factor(ifelse(as.numeric(as.character(group)) > 0,
+                                         "Critical window", "Baseline window"),
+                                  levels = c("Baseline window", "Critical window")),
+              y     = predicted * yb_sd + yb_mean,
+              lower = conf.low  * yb_sd + yb_mean,
+              upper = conf.high * yb_sd + yb_mean)
+}) |>
+  mutate(sim_type = factor(sim_type, levels = vars5))
+
+# wrap long facet titles so they fit above five panels at poster size
+facet_labs5_wrapped <- setNames(stringr::str_wrap(facet_labs5, width = 14), names(facet_labs5))
+
+baseline_interaction_plot5 <- ggplot(pred_window,
+                                     aes(similarity, y, colour = window, fill = window)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", linewidth = 0.9, alpha = 0.7) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 1.8) +
+  facet_wrap(~ sim_type, nrow = 1, ncol = 5, scales = "free_x",
+             labeller = labeller(sim_type = facet_labs5_wrapped)) +
+  scale_y_continuous(breaks = seq(0.2, 1, 0.2)) +
+  coord_cartesian(ylim = c(0.2, 1)) +
+  labs(x = "Target–distractor similarity (z-scored)",
+       y = "Predicted proportion\ntarget looking",
+       colour = "Trial window", fill = "Trial window") +
+  theme_classic(base_size = 22) +
+  theme(legend.position = "bottom",
+        axis.title   = element_text(size = 26),
+        axis.text    = element_text(size = 20, colour = "black"),
+        axis.line    = element_line(linewidth = 0.9),
+        axis.ticks   = element_line(linewidth = 0.9),
+        strip.text   = element_text(size = 34, margin=margin(t=6, b=6)),
+        legend.title = element_text(size = 24),
+        legend.text  = element_text(size = 22),
+        legend.key.width = unit(2.5, "lines"),
+        panel.spacing = unit(1.5, "lines"),
+        plot.margin = margin(t = 5.5, r = 20, b = 5.5, l = 5.5, unit = "pt"))
+
+ggsave(here("figures", "baseline_interaction_zscored.png"),
+       baseline_interaction_plot5, width = 20.143, height = 7.421, dpi = 300, bg = "white")
+ggsave(here("figures", "baseline_interaction_zscored.svg"),
+       baseline_interaction_plot5, width = 20.143, height = 7.421, device = "pdf")
+
+baseline_interaction_plot5
+```
+
+## Sanity check all models
+```{r}
+check_conv <- function(m) {
+  msg <- m@optinfo$conv$lme4$messages
+  if (is.null(msg)) "ok" else paste(msg, collapse = " | ")
+}
+
+objs <- mget(ls(envir = .GlobalEnv), envir = .GlobalEnv)
+res  <- list()
+for (nm in names(objs)) {
+  o <- objs[[nm]]
+  if (inherits(o, "merMod")) {
+    res[[nm]] <- check_conv(o)
+  } else if (is.list(o) && length(o) && all(sapply(o, inherits, "merMod"))) {
+    for (j in names(o)) res[[paste0(nm, "$", j)]] <- check_conv(o[[j]])
+  }
+}
+res <- unlist(res)
+res[res != "ok"]
 ```
